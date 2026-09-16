@@ -315,3 +315,16 @@ two ESP boards directly over GPIO pins, providing physical serial-style
 inter-router links between Fuzzball instances. That work should have its own
 electrical-layer, framing, flow-control, peer-recovery, and guest-validation
 plan; it is separate from the near-term Ethernet path through XQ/DEQNA.
+
+## KWV11 and DMV boot-compatibility slice
+
+The ESP branch now includes a KWV11-A/C Q-bus clock implementation with
+programmable interval scheduling, CSR/BPR access, overflow interrupts, and
+automatic Q-bus registration. It also includes a minimal `DMV` device
+registration shim at the existing DMC/DMV device slot. The shim exposes stable
+CSR/data registers and clears both DMC interrupt sources on reset or command;
+it intentionally has no serial peer, DMA protocol, or DDCMP transport yet.
+
+IDF 6.0.2 builds the combined image at `0x117b40` (13% app space free).
+This proves source integration only; the next validation boundary is a
+flashed-board register probe followed by a copied Fuzzball DCN6 boot image.
