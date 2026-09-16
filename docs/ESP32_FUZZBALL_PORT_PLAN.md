@@ -340,11 +340,12 @@ interrupt, while command/data fields remain transport-free. The software-only
 IDF 6.0.2 build is `0x118140` (12% app space free). Hardware and guest probes
 remain pending until the ESP boards are located.
 
-### DLI address caveat
+### DLI address status
 
-The generic ESP autoconfiguration table currently offers ordinary contiguous
-DLI slots (for example `016520`), while DCN6 expects sparse line addresses
-`176520`, `176540`, and `176560`. Therefore the newly compiled DLI/DLO layer
-is only a source-integration placeholder; it is not yet evidence that a DCN6
-guest can initialize its historical line map. The next software-only task is
-an explicitly selected sparse three-line mapping with vectors `0320/0340/0360`.
+The DLI/DLO layer now uses an explicitly selected sparse three-line range at
+`176520`, `176540`, and `176560` (8-byte spacing) with vector base `0320`.
+This matches the DCN6 register layout for source-level integration. It still
+provides no host serial I/O, and the shared interrupt/vector behavior needs a
+guest probe once hardware is available.
+
+The IDF 6.0.2 software-only image is `0x1181e0` (12% app space free).
