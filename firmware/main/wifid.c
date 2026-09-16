@@ -126,7 +126,7 @@ void wifid_parse_packet(uint8_t *buffer, int len) {
 		strncpy((char*)wifi_cfg.sta.password, wcmd->connect.pass, sizeof(wifi_cfg.sta.password));
 		wifi_cfg.sta.pmf_cfg.capable = true;
 		wifi_cfg.sta.pmf_cfg.required = false;
-		esp_err_t r=esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_cfg);
+		esp_err_t r=esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
 		if (r==ESP_OK) {
 			send_error_on_disconnect=0;
 			wifi_if_ena_auto_reconnect(0);

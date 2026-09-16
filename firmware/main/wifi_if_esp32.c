@@ -74,7 +74,7 @@ static esp_err_t wifi_netif_tx(void *driver, void *buffer, size_t len) {
 	printf("LWIP Tx:\n");
 	hexdump(buffer, len);
 #endif
-	esp_err_t ret=esp_wifi_internal_tx(ESP_IF_WIFI_STA, buffer, len);
+	esp_err_t ret=esp_wifi_internal_tx(WIFI_IF_STA, buffer, len);
 	ESP_ERROR_CHECK(ret);
 	return ret;
 }
@@ -84,7 +84,7 @@ static esp_err_t wifi_netif_tx_wrap(void *driver, void *buffer, size_t len, void
 	printf("LWIP Tx by ref:\n");
 	hexdump(buffer, len);
 #endif
-	esp_err_t ret=esp_wifi_internal_tx_by_ref(ESP_IF_WIFI_STA, buffer, len, netstack_buffer);
+	esp_err_t ret=esp_wifi_internal_tx_by_ref(WIFI_IF_STA, buffer, len, netstack_buffer);
 	//Ignore any errors, wifi is lossy anyway.
 	return ret;
 }
@@ -101,7 +101,7 @@ int wifi_if_write(uint8_t *packet, int len) {
 	printf("PDP11 TX:\n");
 	hexdump(packet, len);
 #endif
-	esp_wifi_internal_tx(ESP_IF_WIFI_STA, packet, len);
+	esp_wifi_internal_tx(WIFI_IF_STA, packet, len);
 	return len;
 }
 
@@ -277,7 +277,7 @@ static esp_netif_t *wifi_sta_filtered_init_netif() {
 	esp_netif_t *wifi_filtered_netif = esp_netif_new(&cfg);
 	ESP_ERROR_CHECK(esp_netif_set_driver_config(wifi_filtered_netif, &driver_ifconfig));
 	ESP_ERROR_CHECK(esp_netif_attach(wifi_filtered_netif, &driver_ifconfig));
-	esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, (wifi_rxcb_t) wlan_sta_rx_callback);
+	esp_wifi_internal_reg_rxcb(WIFI_IF_STA, (wifi_rxcb_t) wlan_sta_rx_callback);
 	esp_err_t  ret;
 	if ((ret = esp_wifi_internal_reg_netstack_buf_cb(esp_netif_netstack_buf_ref, esp_netif_netstack_buf_free)) != ESP_OK) {
 		ESP_LOGE(TAG, "netstack cb reg failed with %d", ret);
@@ -337,4 +337,3 @@ void wifi_if_get_mac(char *txtmac) {
 	esp_read_mac(mac, 0);
 	sprintf(txtmac, "%02hhX:%02hhX:%02hhX:%02hhX:%02hhX:%02hhX", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
-

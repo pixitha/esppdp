@@ -51,10 +51,14 @@
 
 /* Byte write macros for system registers */
 
+#define EVN_IGN(cur) \
+    if ((access == WRITEB) && ((pa & 1) == 0)) \
+        return SCPE_OK
+
 #define ODD_IGN(cur) \
     if ((access == WRITEB) && (pa & 1)) \
         return SCPE_OK
-#define ODD_WO(cur) \
+#define ODD_SHF(cur) \
     if ((access == WRITEB) && (pa & 1)) \
         cur = cur << 8
 #define ODD_MRG(prv,cur) \
@@ -431,7 +435,8 @@ switch ((pa >> 1) & 017) {                              /* decode pa<4:1> */
         return SCPE_OK;
 
     case 015:                                           /* PIRQ */
-        ODD_WO (data);
+        EVN_IGN (data);
+        ODD_SHF (data);
         put_PIRQ (data);
         return SCPE_OK;
         }
@@ -467,12 +472,14 @@ t_stat CPU45_wr (int32 data, int32 pa, int32 access)
 switch ((pa >> 1) & 017) {                              /* decode pa<4:1> */
 
     case 015:                                           /* PIRQ */
-        ODD_WO (data);
+        EVN_IGN (data);
+        ODD_SHF (data);
         put_PIRQ (data);
         return SCPE_OK;
 
     case 016:                                           /* STKLIM */
-        ODD_WO (data);
+        EVN_IGN (data);
+        ODD_SHF (data);
         STKLIM = data & STKLIM_RW;
         return SCPE_OK;
         }                                               /* end switch pa */
@@ -546,7 +553,8 @@ switch ((pa >> 1) & 017) {                              /* decode pa<4:1> */
         return SCPE_OK;
 
     case 016:                                           /* STKLIM */
-        ODD_WO (data);
+        EVN_IGN (data);
+        ODD_SHF (data);
         STKLIM = data & STKLIM_RW;
         return SCPE_OK;
         }                                               /* end switch pa */
@@ -622,7 +630,8 @@ t_stat CPU70_wr (int32 data, int32 pa, int32 access)
 switch ((pa >> 1) & 017) {                              /* decode pa<4:1> */
 
     case 002:                                           /* MEMERR */
-        ODD_WO (data);
+        EVN_IGN (data);
+        ODD_SHF (data);
         MEMERR = MEMERR & ~data;
         return SCPE_OK;
 
@@ -653,12 +662,14 @@ switch ((pa >> 1) & 017) {                              /* decode pa<4:1> */
         return SCPE_OK;
 
     case 015:                                           /* PIRQ */
-        ODD_WO (data);
+        EVN_IGN (data);
+        ODD_SHF (data);
         put_PIRQ (data);
         return SCPE_OK;
 
     case 016:                                           /* STKLIM */
-        ODD_WO (data);
+        EVN_IGN (data);
+        ODD_SHF (data);
         STKLIM = data & STKLIM_RW;
         return SCPE_OK;
         }                                               /* end switch pa */
@@ -735,7 +746,8 @@ switch ((pa >> 1) & 017) {                              /* decode pa<4:1> */
         return SCPE_OK;
 
     case 015:                                           /* PIRQ */
-        ODD_WO (data);
+        EVN_IGN (data);
+        ODD_SHF (data);
         put_PIRQ (data);
         return SCPE_OK;
         }                                               /* end switch pa */
@@ -779,7 +791,7 @@ switch ((pa >> 1) & 03) {                               /* decode pa<2:1> */
         MAINT = data;
         return SCPE_OK;
     case 2:                                             /* CDR */
-        ODD_WO (data);
+        EVN_IGN (data);
         DR = data & CDRFB_WR;
         return SCPE_OK;
         }
@@ -837,7 +849,7 @@ switch ((pa >> 1) & 03) {                               /* decode pa<2:1> */
         return SCPE_OK;
 
     case 2:                                             /* CDR */
-        ODD_WO (data);
+        EVN_IGN (data);
         DR = data & CDRJB_WR;
         return SCPE_OK;
         }
@@ -928,7 +940,7 @@ switch ((pa >> 1) & 03) {                               /* decode pa<2:1> */
         return SCPE_OK;
 
     case 2:                                             /* CDR */
-        ODD_WO (data);
+        EVN_IGN (data);
         DR = data & CDRJE_WR;
         return SCPE_OK;
 

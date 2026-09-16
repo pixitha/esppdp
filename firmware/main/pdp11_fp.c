@@ -536,7 +536,7 @@ switch ((IR >> 8) & 017) {                              /* decode IR<11:8> */
 
     case 003:                                           /* MODf */
         if (ReadFP (&fsrc, GeteaFP (dstspec, lenf), dstspec, lenf)) {
-        F_LOAD (qdouble, FR[ac], fac);
+            F_LOAD (qdouble, FR[ac], fac);
             newV = modfp11 (&fac, &fsrc, &modfrac);
             F_STORE (qdouble, fac, FR[ac | 1]);
             F_STORE (qdouble, modfrac, FR[ac]);
@@ -787,8 +787,9 @@ else {
     }
 if ((GET_SIGN (fptr->h) != 0) &&
     (GET_EXP (fptr->h) == 0) &&
-    (fpnotrap (FEC_UNDFV) == 0))
-    return FALSE;
+    !fpnotrap (FEC_UNDFV)) {                            /* trap enabled? */
+    return FALSE;                                       /* NOP instruction */
+    }
 return TRUE;
 }
 

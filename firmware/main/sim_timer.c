@@ -1782,6 +1782,7 @@ return SCPE_OK;
 t_stat sim_set_throt (int32 arg, CONST char *cptr)
 {
 CONST char *tptr;
+char *endptr;
 char c;
 t_value val, val2 = 0;
 
@@ -1797,13 +1798,15 @@ else if (sim_idle_rate_ms == 0) {
 else {
     if (*cptr == '\0')
         return sim_messagef (SCPE_ARG, "Missing throttle mode specification\n");
-    val = strtol (cptr, &tptr, 10);
+    val = strtol (cptr, &endptr, 10);
+    tptr = endptr;
     if (cptr == tptr)
         return sim_messagef (SCPE_ARG, "Invalid throttle specification: %s\n", cptr);
     sim_throt_sleep_time = sim_idle_rate_ms;
     c = (char)toupper (*tptr++);
     if (c == '/') {
-        val2 = strtol (tptr, &tptr, 10);
+        val2 = strtol (tptr, &endptr, 10);
+        tptr = endptr;
         if ((*tptr != '\0') || (val == 0))
             return sim_messagef (SCPE_ARG, "Invalid throttle delay specifier: %s\n", cptr);
         }
