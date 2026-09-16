@@ -306,3 +306,12 @@ loopback tracing uses a stable label. The newer desktop `eth_filter_hash_ex`
 and DELQA-Plus broadcast-filter changes are intentionally not copied because
 the ESP packet backend does not provide that API or host Ethernet filter
 model. IDF 6.0.2 builds the unchanged `0x1173c0` image.
+
+## Future project: physical DMV inter-router links
+
+Full DMV11/DMC11 serial support is intentionally deferred from the ESP boot
+port. A later project can revisit the complete DDCMP controller and connect
+two ESP boards directly over GPIO pins, providing physical serial-style
+inter-router links between Fuzzball instances. That work should have its own
+electrical-layer, framing, flow-control, peer-recovery, and guest-validation
+plan; it is separate from the near-term Ethernet path through XQ/DEQNA.
