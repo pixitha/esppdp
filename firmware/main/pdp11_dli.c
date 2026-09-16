@@ -36,8 +36,12 @@ static t_stat dlo_wr (int32 data, int32 pa, int32 access) {
 }
 static t_stat dli_reset (DEVICE *dptr) { memset (dli_csr, 0, sizeof dli_csr); memset (dli_buf, 0, sizeof dli_buf); dli_pending_line = 0; CLR_INT (DLI); return SCPE_OK; }
 static t_stat dlo_reset (DEVICE *dptr) { memset (dlo_csr, 0, sizeof dlo_csr); memset (dlo_buf, 0, sizeof dlo_buf); dlo_pending_line = 0; for (int i=0; i<DCN6_DLI_LINES; i++) dlo_csr[i] = DL_CSR_DONE; CLR_INT (DLO); return SCPE_OK; }
-static DIB dli_dib = { DCN6_DLI_BASE, 024, &dli_rd, &dli_wr, 1, IVCL (DLI), 0320, { dli_inta } };
-static DIB dlo_dib = { DCN6_DLI_BASE, 024, &dlo_rd, &dlo_wr, 1, IVCL (DLO), 0320, { dlo_inta } };
+/* The real DL11-family boards decode the same register addresses on
+ * opposite bus directions: reads come from DLI, writes go to DLO.  Keep
+ * that split in the DIBs so SIMH's address-conflict checker accepts the
+ * intentionally shared DCN6 map. */
+static DIB dli_dib = { DCN6_DLI_BASE, 024, &dli_rd, NULL, 1, IVCL (DLI), 0320, { dli_inta } };
+static DIB dlo_dib = { DCN6_DLI_BASE, 024, NULL, &dlo_wr, 1, IVCL (DLO), 0320, { dlo_inta } };
 static UNIT dli_unit = { UDATA (NULL, UNIT_IDLE, 0) }, dlo_unit = { UDATA (NULL, UNIT_IDLE, 0) };
 static REG dl_reg[] = { { ORDATA (CSR, dli_csr[0], 16) }, { ORDATA (BUF, dli_buf[0], 16) }, { NULL } };
 static MTAB dl_mod[] = { { MTAB_XTD|MTAB_VDV, 0, "ADDRESS", NULL, NULL, &show_addr, NULL }, { MTAB_XTD|MTAB_VDV|MTAB_VALR, 0, "VECTOR", "VECTOR", &set_vec, &show_vec, NULL }, { 0 } };
