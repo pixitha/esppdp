@@ -328,3 +328,7 @@ it intentionally has no serial peer, DMA protocol, or DDCMP transport yet.
 IDF 6.0.2 builds the combined image at `0x117b40` (13% app space free).
 This proves source integration only; the next validation boundary is a
 flashed-board register probe followed by a copied Fuzzball DCN6 boot image.
+
+The DLI/DLO compatibility layer is now also registered. It provides safe
+CSR/data access and interrupt clearing for the configured line slots without
+host serial I/O. The IDF 6.0.2 image is `0x118000` (12% app space free).
