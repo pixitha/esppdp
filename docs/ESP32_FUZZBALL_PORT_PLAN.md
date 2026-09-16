@@ -356,3 +356,21 @@ The DIBs intentionally share the address range by bus direction (DLI handles
 reads, DLO handles writes), matching the DL11-family decode and avoiding a
 false SIMH address conflict. This is compile-validated only; real receive
 interrupts and per-line guest dispatch still require a board probe.
+
+### Hardware candidates on hand
+
+The currently configured image targets the original Xtensa ESP32 with external
+PSRAM and a board-specific LCD/SD pin map. The newly located M5 boards therefore
+need to be treated as separate ports, not drop-in flash targets:
+
+| Board | Assessment |
+| --- | --- |
+| M5StampC5 (ESP32-C5) | RISC-V, 384 KB SRAM, 4 MB flash, no PSRAM; useful later for a reduced emulator or peripheral work, not the current Fuzzball memory footprint. |
+| NanoC6 (ESP32-C6) | RISC-V Wi-Fi 6 board; similarly not compatible with the current Xtensa/PSRAM assumptions and has no display/SD wiring matching this image. |
+| Tab5 (ESP32-P4 + C6 wireless module) | Best memory headroom (32 MB PSRAM), but a major P4/C6 split-port: the current monolithic ESP32 Wi-Fi and LCD/SD paths do not apply directly. |
+| Cardputer Adv (ESP32-S3) | Closest CPU family (Xtensa) and includes display, keyboard, and microSD, but the FN8 configuration is 8 MB flash without the external PSRAM assumed by the current image; requires an S3 board definition and a memory-footprint decision. |
+
+The first practical hardware experiment is therefore the Cardputer only if we
+reduce/verify the PDP-11 memory requirement; otherwise the Tab5 is the stronger
+long-term target once its P4/C6 BSP split is implemented. C5/C6 remain useful
+for future GPIO-linked DMV experiments, not as the initial Fuzzball host.
