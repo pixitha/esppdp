@@ -339,3 +339,12 @@ idle signature; an input request produces a deterministic RDI response and
 interrupt, while command/data fields remain transport-free. The software-only
 IDF 6.0.2 build is `0x118140` (12% app space free). Hardware and guest probes
 remain pending until the ESP boards are located.
+
+### DLI address caveat
+
+The generic ESP autoconfiguration table currently offers ordinary contiguous
+DLI slots (for example `016520`), while DCN6 expects sparse line addresses
+`176520`, `176540`, and `176560`. Therefore the newly compiled DLI/DLO layer
+is only a source-integration placeholder; it is not yet evidence that a DCN6
+guest can initialize its historical line map. The next software-only task is
+an explicitly selected sparse three-line mapping with vectors `0320/0340/0360`.
