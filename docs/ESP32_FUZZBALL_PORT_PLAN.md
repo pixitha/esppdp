@@ -349,3 +349,8 @@ provides no host serial I/O, and the shared interrupt/vector behavior needs a
 guest probe once hardware is available.
 
 The IDF 6.0.2 software-only image is `0x1181e0` (12% app space free).
+
+The DLI/DLO shim now records the sparse line that caused an output request and
+uses acknowledge callbacks to return `0320`, `0340`, or `0360` accordingly.
+This is compile-validated only; real receive interrupts and per-line guest
+dispatch still require a board probe.
