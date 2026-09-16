@@ -332,3 +332,10 @@ flashed-board register probe followed by a copied Fuzzball DCN6 boot image.
 The DLI/DLO compatibility layer is now also registered. It provides safe
 CSR/data access and interrupt clearing for the configured line slots without
 host serial I/O. The IDF 6.0.2 image is `0x118000` (12% app space free).
+
+The DMV shim now models the guest-visible BSEL0/BSEL2/BSEL4/BSEL6 register
+block rather than a generic CSR/data pair. Master clear returns the expected
+idle signature; an input request produces a deterministic RDI response and
+interrupt, while command/data fields remain transport-free. The software-only
+IDF 6.0.2 build is `0x118140` (12% app space free). Hardware and guest probes
+remain pending until the ESP boards are located.
