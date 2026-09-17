@@ -21,6 +21,23 @@ boot.
 The flash and PSRAM values above were read with `esptool` on 2026-09-17. The
 device MAC address was intentionally not recorded here.
 
+## Determining v1.0 versus v1.1
+
+The ESP32-S3 chip and module probe do not identify the DevKitC PCB revision;
+both revisions use the same ESP32-S3-WROOM family and memory options. The
+documented board-level difference is the onboard addressable RGB LED pin:
+
+| Board revision | RGB LED data GPIO |
+| --- | --- |
+| v1.0 / initial release | GPIO48 |
+| v1.1 | GPIO38 |
+
+If the PCB silkscreen does not identify the revision, a small `led_strip` test
+that sends a visible color first on GPIO38 and then on GPIO48 is deterministic:
+only the connected LED pin will respond. Either revision is otherwise suitable
+for this port; the current profile follows v1.1. `esptool` cannot distinguish
+the PCB revisions.
+
 ## Board connections
 
 The DevKitC exposes most usable module GPIOs on two headers and provides both a
