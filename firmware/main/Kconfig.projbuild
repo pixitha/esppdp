@@ -12,6 +12,8 @@ menu "ESP-PDP11 Configuration"
             bool "Final dedicated board"
         config ESPPDP_HW_2432S028
             bool "Sunton 2432S028 board"
+        config ESPPDP_HW_S3_DEVKITC
+            bool "Espressif ESP32-S3-DevKitC-1 (N16R8)"
     endchoice
 
 

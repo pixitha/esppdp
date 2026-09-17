@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
-#include "esp32/rom/lldesc.h"
 #include "sys/queue.h"
 #include "soc/soc.h"
 #include "esp_event.h"

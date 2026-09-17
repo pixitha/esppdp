@@ -374,3 +374,20 @@ The first practical hardware experiment is therefore the Cardputer only if we
 reduce/verify the PDP-11 memory requirement; otherwise the Tab5 is the stronger
 long-term target once its P4/C6 BSP split is implemented. C5/C6 remain useful
 for future GPIO-linked DMV experiments, not as the initial Fuzzball host.
+
+### ESP32-S3 DevKitC N16R8 bring-up
+
+Three Espressif ESP32-S3-DevKitC boards are now available. The first board
+identifies as ESP32-S3 revision 0.2 with 8 MB embedded PSRAM and 16 MB flash.
+The dedicated profile is `ESPPDP_HW_S3_DEVKITC`; it leaves the classic ESP32
+configuration untouched, disables the unsupported Classic-Bluetooth HID path,
+and reserves GPIO35--37 for octal flash/PSRAM. The bare DevKitC has no LCD or
+microSD socket, so the profile's exposed GPIO assignments are for later
+external wiring.
+
+The S3 profile builds successfully under ESP-IDF 6.0.2. The generated image is
+`0x125610` with 8% free in the current `0x140000` app partition. To reproduce
+the clean-target build, preserve the existing `sdkconfig`, remove it, then run
+`SDKCONFIG_DEFAULTS=sdkconfig.defaults.esp32s3_n16r8 idf.py set-target esp32s3`
+followed by the same defaults-qualified `idf.py build`. This is source/build
+evidence only; flashing and runtime validation are still pending.

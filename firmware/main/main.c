@@ -31,6 +31,8 @@
 #include "hw_2432S028.h"
 #elif CONFIG_ESPPDP_HW_FINAL
 #include "hw_final.h"
+#elif CONFIG_ESPPDP_HW_S3_DEVKITC
+#include "hw_s3_devkitc.h"
 #else
 #error ESPPDP Hardware not configured, use 'idf.py menuconfig' to choose
 #endif
@@ -225,4 +227,3 @@ void app_main(void) {
 	fflush(stdout);
 	esp_restart();
 }
-
