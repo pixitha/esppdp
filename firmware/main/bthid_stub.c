@@ -2,5 +2,7 @@
 // API linkable while leaving Bluetooth input disabled for initial bring-up.
 
 void bthid_start(void) {}
-int bthid_getchar(void) { return 0; }
+/* No Bluetooth HID input is available on the ESP32-S3.  Match the real
+ * bthid_getchar() contract: -1 means no character is pending. */
+int bthid_getchar(void) { return -1; }
 int bthid_connected(void) { return 0; }

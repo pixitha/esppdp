@@ -16,5 +16,70 @@ menu "ESP-PDP11 Configuration"
             bool "Espressif ESP32-S3-DevKitC-1 (N16R8)"
     endchoice
 
+    config ESPPDP_BOOT_UNIX_V6
+        bool "Boot bundled Unix V6 RK05 image"
+        default y if ESPPDP_HW_S3_DEVKITC
+        default n
+        help
+            Attach the bundled Unix_V6.RK05 image from SPIFFS and boot it
+            through the RK11 controller. When disabled, retain the RX floppy
+            startup path.
+
+    config ESPPDP_BOOT_TRACE
+        bool "Print bounded SIMH CPU, console, clock, and RK boot traces"
+        default n
+        help
+            Enable the temporary low-level traces used during Unix V6
+            bring-up. Leave disabled for normal guest operation; SIMH
+            controller and disk I/O errors remain visible.
+
+    config ESPPDP_PERF_TRACE
+        bool "Report SIMH instruction, disk, and console throughput"
+        default n
+        help
+            Every five seconds report guest instruction rate and time spent
+            in synchronous disk reads and terminal output. Intended for
+            performance diagnosis; does not emit per-instruction logs.
+
+    config ESPPDP_HANG_PROBE
+        bool "Report low-rate cross-core SIMH progress during a hang investigation"
+        default n
+        help
+            A CPU0 task reports sampled guest instructions, event processing,
+            and terminal input/output counters every five seconds. Disable
+            after diagnosing a stall; this is not normal runtime logging.
+
+    config ESPPDP_INITIAL_IPS
+        int "Initial SIMH instruction-rate estimate"
+        range 10000 5000000
+        default 200000 if ESPPDP_HW_S3_DEVKITC
+        default 1000000
+        help
+            Seed SIMH's guest clock scheduler before runtime clock
+            calibration converges. This is an estimate, not a CPU speed cap.
+            Tune it using measured guest instructions per second on the target.
+
+    config ESPPDP_SD_CARD_DIAG
+        bool "Run SD card mount and scratch-file diagnostic only"
+        default n
+        help
+            After mounting the SD card, write and verify a small temporary
+            file, then stop before starting SIMH. The card is never formatted
+            automatically. Disable after hardware bring-up to boot the guest.
+
+    config ESPPDP_EPAPER_TEST
+        bool "Run 1.54-inch e-paper diagnostic at boot"
+        default n
+        help
+            Initialize the external GDEW0154Z04 e-paper panel and render a
+            simple black/red wiring test before starting the emulator.
+
+    config ESPPDP_OLED_TEST
+        bool "Run 0.96-inch I2C OLED diagnostic at boot"
+        default n
+        help
+            Initialize a common SSD1306 128x64 I2C OLED at address 0x3C and
+            render a high-contrast wiring test before starting the emulator.
+
 
 endmenu

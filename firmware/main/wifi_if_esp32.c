@@ -13,6 +13,22 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include "sdkconfig.h"
+
+#if CONFIG_ESPPDP_HW_S3_DEVKITC
+
+/* The bare DevKitC has no radio integration in this bring-up profile.  Keep
+ * the SIMH Ethernet hooks present, but do not initialize ESP Wi-Fi/PHY. */
+void wifi_if_open(void) { printf("WiFi disabled for ESP32-S3 DevKitC\n"); }
+void wifi_if_close(void) { }
+int wifi_if_write(uint8_t *packet, int len) { (void)packet; return len; }
+int wifi_if_read(uint8_t *packet, int maxlen) { (void)packet; (void)maxlen; return 0; }
+void wifi_if_get_mac(char *txtmac) { if (txtmac) sprintf(txtmac, "00:00:00:00:00:00"); }
+void wifi_if_wifid_send_to_pdp(void *buffer, uint16_t len) { (void)buffer; (void)len; }
+void wifi_if_ena_auto_reconnect(int do_reconnect) { (void)do_reconnect; }
+
+#else
+
 #include "hexdump.h"
 #include "wifi_if.h"
 #include <unistd.h>
@@ -336,3 +352,5 @@ void wifi_if_get_mac(char *txtmac) {
 	esp_read_mac(mac, 0);
 	sprintf(txtmac, "%02hhX:%02hhX:%02hhX:%02hhX:%02hhX:%02hhX", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
+
+#endif /* CONFIG_ESPPDP_HW_S3_DEVKITC */

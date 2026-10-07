@@ -601,6 +601,7 @@ typedef struct pdp_dib DIB;
 #define INT_V_CLK       1
 #define INT_V_PCLK      2
 #define INT_V_KWV11     3
+#define INT_V_KWV11_ST2 7
 #define INT_V_DTA       3
 #define INT_V_TA        4
 #define INT_V_CR        5                               /* CR11 */
@@ -667,6 +668,7 @@ typedef struct pdp_dib DIB;
 #define INT_CLK         (1u << INT_V_CLK)
 #define INT_PCLK        (1u << INT_V_PCLK)
 #define INT_KWV11       (1u << INT_V_KWV11)
+#define INT_KWV11_ST2   (1u << INT_V_KWV11_ST2)
 #define INT_DTA         (1u << INT_V_DTA)
 #define INT_TA          (1u << INT_V_TA)
 #define INT_CR          (1u << INT_V_CR)
@@ -723,7 +725,7 @@ typedef struct pdp_dib DIB;
 #define INT_NG          (1u << INT_V_NG)
 
 #define INT_INTERNAL7   (INT_PIR7)
-#define INT_INTERNAL6   (INT_PIR6 | INT_CLK | INT_KWV11)
+#define INT_INTERNAL6   (INT_PIR6 | INT_CLK | INT_KWV11 | INT_KWV11_ST2)
 #define INT_INTERNAL5   (INT_PIR5)
 #define INT_INTERNAL4   (INT_PIR4)
 #define INT_INTERNAL3   (INT_PIR3)
@@ -734,6 +736,7 @@ typedef struct pdp_dib DIB;
 #define IPL_CLK         6
 #define IPL_PCLK        6
 #define IPL_KWV11       6
+#define IPL_KWV11_ST2   6
 #define IPL_DTA         6
 #define IPL_TA          6
 #define IPL_CR          6

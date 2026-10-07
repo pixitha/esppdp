@@ -111,7 +111,7 @@ extern DEVICE xq_dev, xqb_dev;
 extern DEVICE xu_dev, xub_dev;
 extern DEVICE ke_dev;
 extern DEVICE kg_dev;
-extern DEVICE dmc_dev;
+extern DEVICE dmv_dev;
 extern DEVICE kwv11_dev;
 extern DEVICE dup_dev;
 extern DEVICE dpv_dev;
@@ -154,8 +154,11 @@ DEVICE *sim_devices[] = {
     &mba_dev[1],
     &mba_dev[2],
     &clk_dev,
+    /* Keep the host SIMH reset/autoconfiguration order for ported devices.
+       Guest RESET walks sim_devices from index 2 onward. */
+    &kwv11_dev,
 //    &pclk_dev,
-//    &ptr_dev,
+    &ptr_dev,
     &ptp_dev,
     &tti_dev,
     &tto_dev,
@@ -170,17 +173,17 @@ DEVICE *sim_devices[] = {
 //    &vh_dev,
 //    &rc_dev,
 //    &rf_dev,
-//    &rk_dev,
-//    &rl_dev,
+    &rk_dev,
+    &rl_dev,
 //    &hk_dev,
     &rx_dev,
 //    &ry_dev,
-//    &rp_dev,
+    &rp_dev,
 //    &rs_dev,
     &rq_dev,
-//    &rqb_dev,
-//    &rqc_dev,
-//    &rqd_dev,
+    &rqb_dev,
+    &rqc_dev,
+    &rqd_dev,
 //    &dt_dev,
 //    &tm_dev,
 //    &ts_dev,
@@ -195,8 +198,7 @@ DEVICE *sim_devices[] = {
 //    &xu_dev,
 //    &xub_dev,
 //    &kg_dev,
-    &dmc_dev,
-    &kwv11_dev,
+    &dmv_dev,
 //    &dup_dev,
 //    &dpv_dev,
 //    &kmc_dev,

@@ -8,7 +8,7 @@ boot.
 
 | Item | Value |
 | --- | --- |
-| Board | Espressif ESP32-S3-DevKitC-1, v1.1 family |
+| Board | ESP32-S3-DevKitC-1 form factor, GPIO48 LED variant; exact PCB revision not physically marked/verified here |
 | Module | ESP32-S3-WROOM-1, N16R8 as marked/ordered |
 | Silicon observed | ESP32-S3 QFN56, revision v0.2 |
 | CPU | Dual-core Xtensa LX7, up to 240 MHz, plus LP core |
@@ -32,18 +32,20 @@ documented board-level difference is the onboard addressable RGB LED pin:
 | v1.0 / initial release | GPIO48 |
 | v1.1 | GPIO38 |
 
-If the PCB silkscreen does not identify the revision, a small `led_strip` test
-that sends a visible color first on GPIO38 and then on GPIO48 is deterministic:
-only the connected LED pin will respond. Either revision is otherwise suitable
-for this port; the current profile follows v1.1. `esptool` cannot distinguish
-the PCB revisions.
+The diagnostic probe was run on this board and the addressable LED responded
+on GPIO48. We therefore record this physical board as the GPIO48 variant and
+use GPIO48 in the ESP-PDP11 profile. `esptool` cannot distinguish the PCB
+revisions, so the observed LED response is the authoritative identification
+for our hardware.
 
 ## Board connections
 
 The DevKitC exposes most usable module GPIOs on two headers and provides both a
 USB-to-UART port and the ESP32-S3 native USB OTG port. The Boot button enters
 download mode when held while resetting; the Reset button restarts the board.
-The v1.1 RGB LED is driven by GPIO38.
+This board's addressable RGB LED is driven by GPIO48. The separate red power
+indicator and green/blue USB-UART activity indicators are not controlled by
+the ESP-PDP11 status LED driver.
 
 For the octal-memory variant, GPIO35, GPIO36, and GPIO37 are reserved for the
 internal flash/PSRAM interface and must not be assigned to external devices.
@@ -72,11 +74,38 @@ The current external-peripheral reservation is:
 | --- | --- |
 | IE15 SPI display MOSI/SCLK/CS/DC | 11 / 12 / 10 / 9 |
 | IE15 display reset/backlight | not connected (`GPIO_NUM_NC`) |
-| SPI microSD MOSI/SCLK/MISO/CS | 13 / 14 / 4 / 5 |
+| Proposed microSD SDMMC CLK/CMD/D0/D1/D2/D3 | 14 / 13 / 4 / 6 / 15 / 5 |
+| SPI microSD fallback MOSI/SCLK/MISO/CS | 13 / 14 / 4 / 5 |
 
-These assignments are a placeholder for later wiring; the bare DevKitC has no
-onboard LCD or microSD socket. SPI2 is reserved for the display path and SPI3
-for the SD path in the profile.
+The separate 1.54-inch e-paper bring-up uses the side-header wiring documented in
+[`EPAPER_GDEW0154Z04_WIRING.md`](EPAPER_GDEW0154Z04_WIRING.md); it is not the
+DevKitC's onboard display path.
+
+The 0.96-inch I2C OLED wiring and current heat/failure caution are documented in
+[`OLED_SSD1306_WIRING.md`](OLED_SSD1306_WIRING.md).
+
+The bare DevKitC has no onboard LCD or microSD socket. The external SDMMC
+breakout has mounted successfully in 4-bit mode at 20 MHz, including during
+the pre-SIMH boot-menu test. The OLED is currently disconnected. See
+[`ESP32_S3_SD_CARD_PLAN.md`](ESP32_S3_SD_CARD_PLAN.md). SPI2 remains reserved
+for the legacy display path.
+
+## Native USB host power finding
+
+The local Rev 1.1 schematic (`SCH_ESP32-S3-DevKitC-1_V1.1_20221130.pdf`,
+sheet 2) confirms that the native ESP USB connector has the correct data
+routing: connector D- and D+ go to GPIO19 and GPIO20 through the USB ESD
+network (D8--D10). Its VBUS path is input-only. The connector's `VBUSB` net
+feeds `VCC_5V` through Schottky diode D7, just as the USB-to-UART connector
+feeds that rail through D1. There is no host-power switch, current limiter, or
+return path from `VCC_5V` to the native connector VBUS in this schematic.
+
+The board therefore has the correct USB data traces but is not electrically
+host-ready for a bus-powered keyboard by itself. Powering the board from the
+`5V` header (or either USB connector) powers the ESP32, but does not prove
+that a keyboard receives 5 V on USB VBUS. Use a powered OTG hub or a
+current-limited 5 V VBUS injection/adapter for keyboard testing. Do not inject
+5 V into `3V3`, and do not tie independent 5 V sources together.
 
 Classic Bluetooth HID is disabled for this target because ESP32-S3 provides
 Bluetooth LE, not the Classic-Bluetooth API used by the legacy HID component.

@@ -32,6 +32,11 @@
 
 
 #include "sim_defs.h"
+/* This translation unit does not use SIMH's BIT table initializer.  Remove
+ * it before ESP-IDF headers are parsed; IDF uses BIT(n) as an expression. */
+#ifdef BIT
+#undef BIT
+#endif
 #include "sim_rev.h"
 #include "sim_disk.h"
 #include "sim_ether.h"
@@ -49,6 +54,78 @@
 #include <setjmp.h>
 #include <sys/stat.h>
 #include "wifi_if.h"
+#include "sdkconfig.h"
+#ifdef ESP_PLATFORM
+#include "boot_menu.h"
+#include "pdp11_defs.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
+
+#ifdef ESP_PLATFORM
+extern void dmv_configure_bos6_boot(void);
+extern void dli_configure_bos6_boot(void);
+extern t_stat auto_config(const char *name, int32 nctrl);
+t_stat set_autocon(UNIT *uptr, int32 val, CONST char *cptr, void *desc);
+
+static void embedded_sim_console(DEVICE *bootdev)
+{
+	char line[64];
+	sim_host_escape_enable(FALSE);
+	printf("\n\nSIMH embedded console (limited command set)\n");
+	printf("Commands: CONTINUE, BOOT, HELP\n");
+	for (;;) {
+		size_t used = 0;
+		printf("sim> ");
+		fflush(stdout);
+		for (;;) {
+			t_stat input = sim_poll_kbd();
+			if (input < SCPE_KFLAG) {
+				vTaskDelay(pdMS_TO_TICKS(5));
+				continue;
+			}
+			int c = input & 0377;
+			if ((c == '\r') || (c == '\n')) {
+				putchar('\n');
+				line[used] = '\0';
+				break;
+			}
+			if ((c == '\b' || c == 0177) && used > 0) {
+				used--;
+				printf("\b \b");
+				fflush(stdout);
+				continue;
+			}
+			if (c >= 0x20 && c < 0x7f && used < sizeof(line) - 1) {
+				line[used++] = (char)toupper(c);
+				putchar(c);
+				fflush(stdout);
+			}
+		}
+		char *cmd = line;
+		while (isspace((unsigned char)*cmd)) cmd++;
+		if ((strcmp(cmd, "C") == 0) || (strcmp(cmd, "CONTINUE") == 0) || (*cmd == '\0'))
+			break;
+		if ((strcmp(cmd, "HELP") == 0) || (strcmp(cmd, "?") == 0)) {
+			printf("CONTINUE (C) resumes the guest; BOOT restarts the selected disk.\n");
+			continue;
+		}
+		if (strcmp(cmd, "BOOT") == 0) {
+			if (bootdev == NULL || bootdev->boot == NULL) {
+				printf("No bootable disk controller is selected.\n");
+				continue;
+			}
+			t_stat boot_status = bootdev->boot(0, bootdev);
+			if (boot_status == SCPE_OK)
+				break;
+			printf("Boot failed: %s\n", sim_error_text(boot_status));
+			continue;
+		}
+		printf("Unknown command. Type HELP for the embedded command list.\n");
+	}
+	sim_host_escape_enable(TRUE);
+}
+#endif
 
 FILE *sim_deb = NULL;                                   /* debug file */
 
@@ -382,16 +459,20 @@ t_stat reset_all (uint32 start) {
 	DEVICE *dptr;
 	uint32 i;
 	t_stat reason;
+	int32 saved_sim_switches = sim_switches;
 	for (i = 0; i < start; i++) {
 		if (sim_devices[i] == NULL) return SCPE_IERR;
 	}
 	for (i = start; (dptr = sim_devices[i]) != NULL; i++) {
+		/* A device reset must not change the switches seen by later devices. */
+		sim_switches = saved_sim_switches;
 		if (dptr->reset != NULL) {
 			reason = dptr->reset (dptr);
 			if (reason != SCPE_OK) return reason;
 		}
 	}
 	for (i = 0; sim_internal_device_count && (dptr = sim_internal_devices[i]); ++i) {
+		sim_switches = saved_sim_switches;
 		if (dptr->reset != NULL) {
 			reason = dptr->reset (dptr);
 			if (reason != SCPE_OK) return reason;
@@ -874,6 +955,7 @@ t_stat set_mod(DEVICE *dev, UNIT *unit, const char *mod, const char *cp, void *d
 #else
 #define RA92_DISK_PATH "/sdcard/rq.dsk"
 #define RX_FLOPPY_PATH "/spiffs/floppy.dsk"
+#define RK05_DISK_PATH "/spiffs/Unix_V6.RK05"
 #endif
 
 int main (int argc, char *argv[]) {
@@ -895,21 +977,64 @@ int main (int argc, char *argv[]) {
 		return EXIT_FAILURE;
 	};
 
-	//We boot BSD if there's a root.dsk file available. We boot from the floppy in spiffs otherwise.
+	/* The pre-SIMH menu binds a disk path to its controller/CPU profile. */
+#ifdef ESP_PLATFORM
+	const boot_choice_t *boot = boot_menu_choice();
+	if (boot == NULL) {
+		fprintf(stderr, "No boot image selected\n");
+		return EXIT_FAILURE;
+	}
+	int has_unix_rk05 = boot->profile == BOOT_RK05;
+	int has_bos6_rd54 = boot->profile == BOOT_BOS6_RD54;
+	int has_bsd_dsk = boot->profile == BOOT_RA92;
+#else
 	int has_bsd_dsk=1;
+	int has_unix_rk05=0;
+	int has_bos6_rd54=0;
 	struct stat statbuf;
 	if (stat(RA92_DISK_PATH, &statbuf)!=0) has_bsd_dsk=0;
+#endif
 
 	//Set main memory capacity...
 	DEVICE *cpudev=find_dev("CPU");
-	if (has_bsd_dsk) {
+	int reset_done = 0;
+	/* The Unix V6 RK05 image is exercised and known-good as a PDP-11/40
+	 * system.  SIMH otherwise defaults to its newer 11/73 model, which is
+	 * not the machine selected by the corresponding desktop boot procedure.
+	 * Choose the CPU before reset_all(), so its MMU and I/O layout are built
+	 * consistently with the installed memory size. */
+	if (has_unix_rk05) {
+		cpudev->units[0].capac = 256 * 1024;
+		printf("Configure PDP-11/40 for RK05\n");
+		status = set_mod(cpudev, cpudev->units, "11/40", NULL, NULL);
+		if (status != SCPE_OK) {
+			printf("PDP-11/40 configuration failed: %s\n", sim_error_text(status));
+			return EXIT_FAILURE;
+		}
+		/* cpu_set_model() resets the device set, including CPU allocation. */
+		reset_done = 1;
+	} else if (has_bos6_rd54) {
+		cpudev->units[0].capac = 2 * 1024 * 1024;
+		/* RK11 is a Unibus controller and is not part of this Qbus profile.
+		 * Disable it before cpu_set_model() resets/autoconfigures the device set. */
+		DEVICE *rk = find_dev("RK");
+		if (rk)
+			rk->flags |= DEV_DIS;
+		printf("Configure PDP-11/73 for BOS6 RD54\n");
+		status = set_mod(cpudev, cpudev->units, "11/73", NULL, NULL);
+		if (status != SCPE_OK) {
+			printf("PDP-11/73 configuration failed: %s\n", sim_error_text(status));
+			return EXIT_FAILURE;
+		}
+		reset_done = 1;
+	} else if (has_bsd_dsk) {
 		cpudev->units[0].capac=3.5*1024*1024;
 	} else {
 		//Assign less memory as the floppy needs to be read into memory entirely
 		cpudev->units[0].capac=512*1024;
 	}
 
-	if ((status = reset_all (0)) != SCPE_OK) {
+	if (!reset_done && (status = reset_all (0)) != SCPE_OK) {
 		fprintf (stderr, "Fatal simulator initialization error\n%s\n",
 			sim_error_text (status));
 		return EXIT_FAILURE;
@@ -921,40 +1046,162 @@ int main (int argc, char *argv[]) {
 	
 	//Set up network device
 	DEVICE *dev=find_dev("XQ");
-	//dev->dctrl=0xfffffffff //enable for debugging info
-	char mac[32];
-	wifi_if_get_mac(mac);
-	set_mod(dev, dev->units, "MAC", mac, NULL);
-	set_mod(dev, dev->units, "TYPE", mac, "DEQNA");
-	dev->attach(dev->units, "WIFI");
+	if (has_bos6_rd54) {
+		/* Match the verified host BOS6 profile: make the DEQNA visible to the
+		 * guest, but leave it unattached.  The ESP32-S3 bring-up Wi-Fi hooks are
+		 * stubs, so attaching "WIFI" here is not equivalent to the host control. */
+		if (!dev) {
+			fprintf(stderr, "BOS6 boot profile is missing XQ\n");
+			return EXIT_FAILURE;
+		}
+		dev->flags &= ~DEV_DIS;
+		status = set_mod(dev, dev->units, "TYPE", "DEQNA", NULL);
+		if (status != SCPE_OK) {
+			fprintf(stderr, "BOS6 DEQNA setup failed: %s\n", sim_error_text(status));
+			return EXIT_FAILURE;
+		}
+	} else {
+		//dev->dctrl=0xfffffffff //enable for debugging info
+		char mac[32];
+		wifi_if_get_mac(mac);
+		set_mod(dev, dev->units, "MAC", mac, NULL);
+		set_mod(dev, dev->units, "TYPE", mac, "DEQNA");
+		dev->attach(dev->units, "WIFI");
+	}
+
+	if (has_bos6_rd54) {
+		DEVICE *rq = find_dev("RQ");
+		DEVICE *kwv = find_dev("KWV11");
+		DEVICE *dmv = find_dev("DMV");
+		DEVICE *dli = find_dev("DLI");
+		DEVICE *dlo = find_dev("DLO");
+		DEVICE *clk = find_dev("CLK");
+		DEVICE *tti = find_dev("TTI");
+		DEVICE *tto = find_dev("TTO");
+		DEVICE *rx = find_dev("RX");
+		if (!rq || !kwv || !dmv || !dli || !dlo || !clk || !tti || !tto || !rx || !dev) {
+			fprintf(stderr, "BOS6 boot profile is missing a required SIMH device\n");
+			return EXIT_FAILURE;
+		}
+		/* Enable the profile devices before reset so their DIBs are registered. */
+		/* Make sure standard device addresses/vectors are assigned before
+		 * freezing auto-configuration for the explicit DLI/DMV overrides below. */
+		status = set_autocon(NULL, 1, NULL, NULL);
+		if (status != SCPE_OK) {
+			fprintf(stderr, "BOS6 auto-configuration enable failed: %s\n", sim_error_text(status));
+			return EXIT_FAILURE;
+		}
+		rq->flags &= ~DEV_DIS;
+		rx->flags &= ~DEV_DIS;
+		dev->flags &= ~DEV_DIS;
+		kwv->flags &= ~DEV_DIS;
+		dmv->flags &= ~DEV_DIS;
+		dli->flags &= ~DEV_DIS;
+		dlo->flags &= ~DEV_DIS;
+		status = auto_config(NULL, 0);
+		if (status == SCPE_OK)
+			status = set_autocon(NULL, 0, NULL, NULL);
+		if (status != SCPE_OK) {
+			fprintf(stderr, "BOS6 auto-configuration failed: %s\n", sim_error_text(status));
+			return EXIT_FAILURE;
+		}
+		DIB *kwv_dib = (DIB *)kwv->ctxt;
+		if (kwv_dib->ba != IOPAGEBASE + 010420 || kwv_dib->vec != 0440) {
+			fprintf(stderr, "BOS6 KWV11 mapping does not match host SIMH profile\n");
+			return EXIT_FAILURE;
+		}
+		status = set_mod(rq, rq->units, "RD54", NULL, NULL);
+		if (status == SCPE_OK) status = set_mod(clk, clk->units, "60HZ", NULL, NULL);
+		if (status == SCPE_OK) status = set_mod(tti, tti->units, "8B", NULL, NULL);
+		if (status == SCPE_OK) status = set_mod(tto, tto->units, "8B", NULL, NULL);
+		if (status != SCPE_OK) {
+			fprintf(stderr, "BOS6 device profile setup failed: %s\n", sim_error_text(status));
+			return EXIT_FAILURE;
+		}
+		dli_configure_bos6_boot();
+		dmv_configure_bos6_boot();
+		status = reset_all(0);
+		if (status != SCPE_OK) {
+			fprintf(stderr, "BOS6 device reset failed: %s\n", sim_error_text(status));
+			return EXIT_FAILURE;
+		}
+		printf("BOS6 profile: 2048K, 60Hz, KWV11, DMV, DLI/DLO, RX, XQ DEQNA, RQ0 RD54\n");
+	}
 
 	if (has_bsd_dsk) {
 		//find rq device, boot off it
 		dev=find_dev("RQ");
 		set_mod(dev, dev->units, "RA92", NULL, NULL);
 		printf("Attach RA92 disk to RQ\n");
-		status=dev->attach(dev->units, RA92_DISK_PATH);
-		if (status!=SCPE_OK) printf("Attach failed...\n");
+		status=dev->attach(dev->units,
+#ifdef ESP_PLATFORM
+		                   boot->path
+#else
+		                   RA92_DISK_PATH
+#endif
+		                   );
 		printf("Boot from RQ\n");
+	} else if (has_bos6_rd54) {
+		printf("Find RQ\n");
+		dev=find_dev("RQ");
+		printf("Attach selected BOS6 RD54\n");
+		status=dev->attach(dev->units, boot->path);
+		printf("Boot selected BOS6 RD54\n");
+	} else if (has_unix_rk05) {
+		printf("Find RK\n");
+		dev=find_dev("RK");
+		printf("Attach selected RK05\n");
+		status=dev->attach(dev->units,
+#ifdef ESP_PLATFORM
+		                   boot->path
+#else
+		                   RK05_DISK_PATH
+#endif
+		                   );
+		printf("Boot selected RK05\n");
 	} else {
 		//boot from floppy. As this is likely tetris, throttle to make timings match
 		sim_set_throt(1, "2000/5"); //sleep for 5ms every 2000 instructions
 		printf("Find RX\n");
 		dev=find_dev("RX");
 		printf("Attach disk to RX\n");
-		status=attach_unit(dev->units, RX_FLOPPY_PATH);
-		if (status!=SCPE_OK) printf("Attach failed...\n");
+		status=attach_unit(dev->units,
+#ifdef ESP_PLATFORM
+		                   boot->path
+#else
+		                   RX_FLOPPY_PATH
+#endif
+		                   );
 		printf("Boot from RX\n");
 	}
+	if (status != SCPE_OK) {
+		fprintf(stderr, "Disk attach failed: %s\n", sim_error_text(status));
+		return EXIT_FAILURE;
+	}
 	status=dev->boot(0, dev);
-	if (status!=SCPE_OK) printf("Boot failed...\n");
+	if (status != SCPE_OK) {
+		fprintf(stderr, "Boot failed: %s\n", sim_error_text(status));
+		return EXIT_FAILURE;
+	}
+#ifdef ESP_PLATFORM
+	boot_menu_remember();
+#endif
 
 	sim_throt_sched(); // Initialize throttling mechanism
 	sim_start_timer_services(); //Enable wall clock timing
 
 	printf("Main sim start\n");
+#ifdef ESP_PLATFORM
+	sim_host_escape_enable(TRUE);
+#endif
 	while(1) { //infinite loop
 		status=sim_instr();
+#ifdef ESP_PLATFORM
+		if (sim_host_escape_requested()) {
+			sim_host_escape_clear();
+			embedded_sim_console(dev);
+		}
+#endif
 	}
 	
 	//never gets here

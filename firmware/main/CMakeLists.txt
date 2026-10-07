@@ -1,9 +1,20 @@
 idf_component_register(SRCS "main.c" "pdp11_cis.c" "pdp11_cpu.c" "pdp11_cpumod.c" "pdp11_dli.c" "pdp11_dmc.c" "pdp11_fp.c" "pdp11_kwv11.c" "pdp11_io.c" "pdp11_io_lib.c" "pdp11_pt.c" 
-					"pdp11_rh.c" "pdp11_rl.c" "pdp11_rom.c" "pdp11_rp.c" "pdp11_rq.c" "pdp11_rx.c" "pdp11_stddev.c" "pdp11_sys.c" 
-					"pdp11_xq.c" "scp.c" "sim_card.c" "sim_disk.c" "sim_ether.c" "sim_evtq.c" "sim_fio.c" "sim_imd.c" 
+					"pdp11_rh.c" "pdp11_rk.c" "pdp11_rl.c" "pdp11_rom.c" "pdp11_rp.c" "pdp11_rq.c" "pdp11_rx.c" "pdp11_stddev.c" "pdp11_sys.c"
+					"pdp11_xq.c" "scp.c" "sim_card.c" "sim_disk.c" "sim_ether.c" "sim_evtq.c" "sim_fio.c" "sim_imd.c"
 					"sim_serial.c" "sim_sock.c" "sim_term.c" "sim_timer.c" "hexdump.c" "wifi_if_esp32.c" 
 					"wifi_if_esp32_packet_filter.c" "wifid.c"
-                    INCLUDE_DIRS ".")
+                    INCLUDE_DIRS "."
+                    REQUIRES status_led boards ie15term usb_keyboard epaper_154c oled_ssd1306 esp_timer nvs_flash spiffs fatfs mbedtls driver esp_driver_usb_serial_jtag esp_wifi esp_netif esp_event)
+
+target_sources(${COMPONENT_LIB} PRIVATE boot_menu.c)
+
+if(CONFIG_ESPPDP_PERF_TRACE)
+    target_sources(${COMPONENT_LIB} PRIVATE sim_perf.c)
+endif()
+
+if(CONFIG_ESPPDP_HANG_PROBE)
+    target_sources(${COMPONENT_LIB} PRIVATE sim_hang_probe.c)
+endif()
 
 if(CONFIG_ESPPDP_HW_S3_DEVKITC)
     target_sources(${COMPONENT_LIB} PRIVATE bthid_stub.c)

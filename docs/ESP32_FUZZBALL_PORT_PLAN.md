@@ -1,8 +1,13 @@
 # ESP32 Fuzzball port plan
 
-Status: base selection complete; active work is migrating the candidate to
-ESP-IDF v6.1 before adding Fuzzball devices.  No ESP32 Fuzzball boot or
-network claim has been made.
+Status (2026-10-07): the ESP32-S3 N16R8 build runs under ESP-IDF 6.0.2,
+boots RT-11 and BOS6 from a four-bit SDMMC card, and has reached a DMILLS
+login. The latest serial run is `logs/esp32-bos6-20261007-124214.log`.
+The remaining gates are a full SIMH control console, safe writable-media
+shutdown/recovery, and demonstrated packet I/O. The S3 Ethernet backend is
+currently disabled; this is a no-peer boot result, not a network result.
+Later dated sections preserve the evidence available at each stage and may
+describe earlier build-only or pre-boot states.
 
 ## Objective
 
@@ -20,6 +25,48 @@ The acceptance ladder is deliberately strict:
 
 Each level is separate evidence.  A successful RT-11 or BOS boot is not proof
 of device compatibility or network operation.
+
+## Deferred storage lifecycle: orderly shutdown and writable media
+
+The bundled boot images are currently stored in SPIFFS and an ESP32 reset is
+an immediate hardware reset: it does not give SIMH an opportunity to detach
+or flush an emulated disk.  Before treating an ESP-hosted guest disk as
+writable, define and validate all of the following:
+
+1. A user-requested guest shutdown path that halts SIMH cleanly, flushes and
+   closes attached media, then reports that power/reset is safe.
+2. A reset/power-loss policy with explicit recovery behavior; never claim that
+   an abrupt reset preserves a guest write.
+3. A read-only, checksummed bundled baseline image and a separately selected
+   writable copy or overlay for experiments.
+4. Flash-wear limits and a backup/export procedure for writable guest state.
+
+Until then, use the bundled image only as a disposable boot fixture.  A normal
+`idf.py flash` rewrites the packaged SPIFFS image; pressing the board Reset
+button only reboots the firmware and auto-boots whatever storage state remains.
+
+On 2026-09-22, the running 16 MiB N16R8 board reported only 151 KiB free in
+the original 0x2a0000-byte SPIFFS partition (2311 KiB used of 2463 KiB
+usable).  Repeated RK error 66 messages accompanied failed writes to the
+Unix V6 image.  The firmware now allocates 0x600000 bytes to SPIFFS at
+0x150000, within the verified flash size.  This is a capacity experiment,
+not yet proof that guest writes survive a long run or reset.  The disk I/O
+diagnostic now reports the failing operation and actual errno; `ferror()`
+is only a stream error flag and must not be interpreted as errno 4/EINTR.
+The first flashed boot with the 0x600000-byte partition reported 2311 KiB
+used of 5640 KiB usable (3328 KiB free) and successfully attached RK0.
+Sustained guest writes and reset recovery remain unverified.
+
+Changing the partition size requires flashing the partition table and a new
+SPIFFS image.  Back up the board's old 0x2a0000-byte partition first if its
+guest changes matter.  A full `idf.py flash` replaces its contents with the
+bundled source image.  Automatic formatting on SPIFFS mount failure is
+disabled so a mount error remains visible rather than erasing guest state.
+After exiting the serial monitor, the N16R8 bench board can be backed up with
+`python -m esptool --chip esp32s3 -p /dev/cu.usbmodem5CBD0162491 read-flash
+0x150000 0x2a0000 ../logs/storage-before-6m-2026-09-22.bin` from the
+`firmware/` directory.  Preserve that file and its checksum before running
+`idf.py -p /dev/cu.usbmodem5CBD0162491 flash monitor`.
 
 ## Workspace layout
 
@@ -101,6 +148,81 @@ The desktop Fuzzball path remains the device oracle:
 - Keep the existing desktop boot profile, copied test media, console logs, and
   peer test as reproducible comparison evidence.
 
+## ESP32-S3 SIMH console restoration plan
+
+Scope: restore an interactive SIMH control/debug console on the ESP32-S3 only.
+Do not extend this work to the Pico/Pico 2 emulator, whose CPU, bus, and monitor
+are a separate implementation.  Do not replace SIMH's SCP command processor
+with an expanding hand-written command subset.
+
+### Current state
+
+The ESP port's `scp.c` is explicitly a trimmed launcher: it selects and boots
+an image, then loops forever around `sim_instr()`.  It has no normal SCP command
+reader/dispatcher, so CPU register definitions and device command tables are
+present without commands such as `EXAMINE`, `SHOW`, or `SET` to reach them.
+Ctrl+E (SIMH's WRU character) was not intercepted at the host-input boundary.
+
+A temporary ESP-only monitor has been added to the current working build.  It
+uses Ctrl+E to stop guest execution and offers only `CONTINUE`, `BOOT`, and
+`HELP`.  It is a diagnostic bridge, not the target interface; it has built with
+ESP-IDF 6.0.2 but still needs a physical test.  The OLED console is disabled to
+keep terminal I/O from blocking on full-frame refreshes.  Current guest evidence
+is RT-11FB V05.05 running from the SD-backed BOS6 image; a normal Fuzzball
+startup/login and durable writable-disk lifecycle are not yet established.
+
+### Target behavior
+
+1. Ctrl+E from either supported serial console stops the PDP-11 at a safe
+   instruction/event boundary, preserves CPU/device state, and presents the
+   `sim>` prompt.  Ctrl+C remains guest input unless a documented SIMH command
+   or break mode says otherwise.
+2. Restore SIMH's command loop and parser from a compatible upstream-derived
+   source revision, adapting its I/O and scheduling boundaries for ESP-IDF.
+   Preserve the existing boot-menu path and do not re-run setup or reset the
+   guest when entering the prompt.
+3. Make the normal inspection/control commands usable first: `HELP`, `SHOW
+   CPU`/device state, `EXAMINE` registers and memory, `DEPOSIT`, `CONTINUE`/
+   `GO`, `STEP`, `RESET`, and `BOOT`.  Then restore the remaining SCP commands
+   supported by the selected source revision, including configuration and
+   media commands where they can be made safe on-device.  Document any
+   intentionally unsupported host-only commands.
+4. Keep prompt work out of the CPU instruction loop.  Use existing SIMH
+   command/device APIs where available; keep output bounded and serial-first,
+   with optional display output decoupled from emulation timing.
+
+### Implementation and validation gates
+
+1. **Source audit:** identify the exact SCP/parser revision corresponding to
+   this ESP fork; list omitted source files, command tables, host I/O calls,
+   and global state transitions.  Compare behavior with desktop SIMH rather
+   than copying a different revision wholesale.
+2. **Stop/resume boundary:** implement host-side WRU interception for UART0
+   and native USB Serial/JTAG.  Verify Ctrl+E is not delivered to the guest,
+   the CPU stops without resetting, event/timer state remains coherent, and
+   `CONTINUE` resumes at the next instruction.
+3. **Parser restoration:** port the SCP line reader, tokenizer, command
+   dispatch/help tables, and only the platform adapters they require.  Check
+   linker/app-partition size and internal-heap/PSRAM headroom at each stage.
+4. **Debugger commands:** validate `SHOW CPU`, register and memory `EXAMINE`,
+   `DEPOSIT`, single-step, breakpoints, continue, reset, and boot against a
+   known RT-11 state and a desktop SIMH transcript.  Confirm octal defaults
+   and PDP-11 address-width behavior match SIMH.
+5. **Physical S3 test:** use a copied, disposable BOS6 image on SD.  From the
+   serial console, pause at RT-11, inspect known registers/memory, resume, and
+   demonstrate that the same guest session continues.  Repeat at a Fuzzball
+   breakpoint/startup point.  Test both the USB-UART and native USB serial
+   inputs independently.
+6. **Performance/regression:** compare timed guest progress and console output
+   with the current OLED-disabled build; ensure command polling is dormant
+   during execution, output does not block the CPU loop, and no watchdog,
+   interrupt, or SD I/O regressions are introduced.
+
+Completion means a board-tested SIMH command prompt with working register and
+memory inspection and reliable pause/resume.  It does not by itself prove a
+Fuzzball boot, a clean guest shutdown, preserved disk writes, or working DMV
+network I/O.
+
 ## Work phases
 
 ### Phase 0 — freeze the platform baseline
@@ -140,6 +262,37 @@ configuration expects.  Port it from the proven desktop implementation, then
 test CSR access, interrupt delivery, DMA/buffer behavior, initialization, and
 traffic with a defined peer in that order.  Report a Fuzzball network success
 only after guest payload exchange is demonstrated.
+
+### Current Phase 3 gate — BOS media and machine profile (2026-09-22)
+
+The known desktop no-peer boot uses
+`fuzzball_workspace/profiles/active/boot_bos6_autostart.ini` with
+`fuzzball_workspace/disks/active/fuzzball_bos6_autostart.img` (159,334,400
+bytes, SHA-256 `ef33a6cd1f8c4f35ade69e933f295d5675f2c2a5b269a13cfbf3fe82d11b911b`).
+It selects an 11/73 with 2048K, 8-bit TTI/TTO, a 60 Hz clock and KWV11,
+and boots an RD54 on RQ0.  Its DMV at CSR `17760020` uses temporary vector
+`0300`; DLI/DLO supply the discrete line CSR map.  That vector is a no-peer
+boot workaround, not a network validation profile.
+
+This RD54 file cannot fit in the N16R8 board's 16 MiB flash. The DevKitC
+profile mounts an external microSD card over four-bit SDMMC; bounded FAT
+read/write diagnostics passed at 20 MHz on 2026-09-22. The ESP boot menu now
+has a dedicated `BOS6.IMG` selection and configures the 11/73, 2 MiB,
+60 Hz, RQ0/RD54, KWV11, DMV, and DLI/DLO no-peer boot profile. The image is
+accepted only at the known 159,334,400-byte size. ESP-IDF 6.0.2 build passed
+after this addition; it has not yet been flashed or guest-tested. Copy the
+canonical desktop fixture to the SD card as a disposable writable copy and
+verify its SHA-256 before selecting it. Keep the desktop source unchanged.
+
+The on-hand 3.3 V breakout, proposed four-bit SDMMC wiring (with SPI fallback),
+and staged validation are documented
+in [the ESP32-S3 SD card plan](ESP32_S3_SD_CARD_PLAN.md). The basic SDMMC
+pinout is now hardware-tested; sustained and guest-disk operation are not.
+
+Temporary CPU, console, clock, and RK traces are now behind
+`CONFIG_ESPPDP_BOOT_TRACE` (off by default) to keep normal logs readable.
+Re-enable the setting for a focused boot diagnosis; disk and controller
+errors print independently of it.
 
 ## Initial deliverables
 
@@ -209,10 +362,15 @@ it.  The v6 migration must explicitly declare split driver dependencies (for
 example `esp_driver_spi`) instead of relying on the old umbrella `driver`
 component.
 
-The first simulator-correctness intake is also building: the KERTAB/Q22 fix
-that forces kernel, supervisor, and user D-space page-7 PDR writes to `077406`
-is now present on `pixitha/fuzzball`. The post-fix IDF 6.0.2 image is
-`0x117360` bytes (13% free). No guest boot claim has been made.
+The pinned, verified host baseline (`vendor/simh-host`, commit
+`36bea593`) does not force kernel, supervisor, or user D-space page-7 PDR
+writes to `077406`. That ESP-only KERTAB workaround was removed on
+2026-09-27 to bring `APR_wr` back in line with the working host source. The
+resulting IDF 6.0.2 build was `0xb82c0` bytes (42% of the app partition
+free), but its BOS6 profile enabled RX after auto-configuration was disabled,
+leaving it without an assigned CSR/vector. That order was corrected on
+2026-09-27; the corrected build is `0xb8310` bytes (42% free) and has not yet
+been flashed or guest-boot tested.
 
 The follow-up SIMH correctness fixes also build cleanly: mask invalid PSW bits
 when loading a trap frame, and accept the exact Q22 I/O-page base in the
@@ -225,9 +383,11 @@ The dirty desktop SIMH tree contains more than the new KWV11 file. Comparing
 its semantic changes with the recovered DCN6 configuration gives this
 transplant order:
 
-1. **KERTAB/MMU correction (required before BOS).** The desktop CPU change
-   forces kernel, supervisor, and user D-space page-7 PDR to `077406` for the
-   Q22 I/O page. This addresses the documented KERTAB page-length fault.
+1. **KERTAB/MMU workaround (not in the pinned working host baseline).** The
+   earlier desktop experiment forced kernel, supervisor, and user D-space
+   page-7 PDR writes to `077406`. Keep it out of the ESP port unless a
+   controlled host comparison demonstrates it is required; the pinned host
+   source accepts the guest's PDR writes unchanged.
 2. **KWV11 (required for `HDWCLK=3`).** Port `pdp11_kwv11.c`, its BR6/vector
    definitions, and the auto-configuration entry, using ESP timer/event
    primitives rather than desktop-only threading.
@@ -318,16 +478,79 @@ plan; it is separate from the near-term Ethernet path through XQ/DEQNA.
 
 ## KWV11 and DMV boot-compatibility slice
 
-The ESP branch now includes a KWV11-A/C Q-bus clock implementation with
-programmable interval scheduling, CSR/BPR access, overflow interrupts, and
-automatic Q-bus registration. It also includes a minimal `DMV` device
-registration shim at the existing DMC/DMV device slot. The shim exposes stable
-CSR/data registers and clears both DMC interrupt sources on reset or command;
-it intentionally has no serial peer, DMA protocol, or DDCMP transport yet.
+The Mac-tested combined source revision is
+`9f916ca8d89cc9cdffe9a023988501c82dd0358a` (KWV11-A/C), directly on top of
+DMV commit `5ba55543e19c7947ac0c7b6c5deebf237fa279fa`. The ESP
+`pdp11_kwv11.c` has now been replaced with the full KWV11 implementation from
+that exact commit, including interval scheduling, CSR/BPR semantics,
+maintenance pulses, capture/overflow status, and both interrupt vectors. The
+ESP interrupt definitions now include the second KWV vector as well.
 
-IDF 6.0.2 builds the combined image at `0x117b40` (13% app space free).
-This proves source integration only; the next validation boundary is a
-flashed-board register probe followed by a copied Fuzzball DCN6 boot image.
+On 2026-09-27, `logs/esp32-bos6-20260927-180451.log` isolated a later BOS6
+stall at guest PC `007254`, the `GTCLK` polling loop for KWV11 ST2 capture.
+The CPU and device events continued, but the guest stopped reading TTI after
+the loop. The KWV11 model stopped mode 2/3 counting on the first 16-bit
+overflow (about 65.5 seconds at BOS6's 1 kHz rate), contrary to the DEC
+KWV11-A manual, which says those modes continue through overflow until GO is
+cleared by software. The ESP copy now keeps mode 2/3 running; IDF 6.0.2 build
+passed before the follow-up hardware test below. The pinned Mac
+source has the same latent device-model bug and is deliberately unchanged so
+the reproducible host baseline stays pinned; track its correction separately.
+
+The 2026-10-07 hardware run in `logs/esp32-bos6-20261007-105309.log`
+confirmed two mode-2 overflows with `GO=1`, continued console input after both,
+and a successful DMILLS login. It also showed guest time move backward from
+`00:01:12` to `00:00:15` across the first rollover. The DEC manual specifies
+that KWV11 CSR status flags are cleared by writing zero, whereas the copied
+model cleared them on read; BOS6's `GTCLK` reads the CSR before explicitly
+clearing `OVFLO`. The ESP model now preserves flags on read and uses
+write-zero-to-clear. This second correction built before the follow-up
+hardware test below. Keep performance diagnosis separate from clock validation.
+
+The follow-up run `logs/esp32-bos6-20261007-110453.log` crossed two overflows
+with `GO=1`, logged in as DMILLS, and accepted commands afterward. The second
+overflow entered with CSR `040145` (the earlier overflow flag had been cleared
+by the guest) and left with `040345`, consistent with write-zero-to-clear.
+No guest time reading was captured after that rollover, so monotonic time is
+not yet confirmed. There were no disk I/O errors, panic, or watchdog messages
+in this run. The remaining perceived slowness needs focused CPU/disk/TTO
+measurement; the five-second instruction samples include guest idle time.
+
+The targeted `TIME` run in `logs/esp32-bos6-20261007-111822.log` confirmed
+monotonic guest time across the second KWV11 overflow: `00:01:45` before,
+`00:02:37` after, and `00:03:25` later. The overflow flag was cleared before
+the second event and `GO` remained set. No panic or disk I/O error was logged.
+The clock rollover issue is hardware-validated for this run; the separate
+performance issue is not yet localized.
+
+A dedicated performance build now enables `CONFIG_ESPPDP_PERF_TRACE` and adds
+separate synchronous SD read/write counts, KiB, and busy milliseconds alongside
+guest instructions per second and terminal-output blocking. The two hardware
+runs `logs/esp32-bos6-20261007-112603.log` and
+`logs/esp32-bos6-20261007-113954.log` flashed the same ELF (`3c3e0fb86...`).
+Both spend about 25 seconds from `Main sim start` to the RT-11 banner; most of
+that interval repeatedly executes around guest PC `005250` with no disk or
+terminal I/O. The busiest measured five-second SD interval spent 1167 ms in
+reads, while 868 terminal characters blocked host output for only 23 ms.
+This excludes serial output as the primary bottleneck, but does not yet
+separate guest boot polling, PDP-11 `WAIT`, and SIMH event-service time.
+
+The next diagnostic image adds per-five-second `WAIT` and event-service wall
+time plus sampled PC/instruction hotspots. It builds under ESP-IDF 6.0.2 as
+`firmware/build/esppdp.bin` (`0xb6be0` bytes; SHA-256
+`d49a398fe1a5dc287a3fa96074665d6da5f0956cbec46611411a19f62240d415`).
+These new counters are build-validated only until a distinct ELF is flashed
+and its boot output is captured.
+
+The ESP `DMV` remains a deliberate no-peer boot shim at the existing
+DMC/DMV device slot. It does not yet implement the desktop model's full DMA,
+serial peer, or DDCMP transport. This is a port-scope difference, not evidence
+that the full desktop DMV implementation is unnecessary for networking.
+
+The combined ESP-IDF 6.0.2 image builds successfully at `0xb0b30` bytes, with
+45% free in the `0x140000` app partition. This is source/build evidence only;
+the exact KWV register behavior, interrupt delivery, and Fuzzball guest boot
+still need hardware validation.
 
 The DLI/DLO compatibility layer is now also registered. It provides safe
 CSR/data access and interrupt clearing for the configured line slots without
@@ -342,20 +565,23 @@ remain pending until the ESP boards are located.
 
 ### DLI address status
 
-The DLI/DLO layer now uses an explicitly selected sparse three-line range at
-`176520`, `176540`, and `176560` (8-byte spacing) with vector base `0320`.
-This matches the DCN6 register layout for source-level integration. It still
+The DLI/DLO layer now maps five contiguous DL11 lines starting at full
+I/O-page address `17776520`, with vector base `0320`. The three DCN6 ports are
+on physical lines 0, 2, and 4: `17776520`, `17776540`, and `17776560` (`020`
+octal, or 16-byte, spacing). Each line has four registers:
+receive CSR/buffer, then transmit CSR/buffer. This matches the desktop SIMH
+DL11 register layout for source-level integration. It still
 provides no host serial I/O, and the shared interrupt/vector behavior needs a
 guest probe once hardware is available.
 
 The IDF 6.0.2 software-only image is `0x1181e0` (12% app space free).
 
-The DLI/DLO shim now records the sparse line that caused an output request and
-uses acknowledge callbacks to return `0320`, `0340`, or `0360` accordingly.
-The DIBs intentionally share the address range by bus direction (DLI handles
-reads, DLO handles writes), matching the DL11-family decode and avoiding a
-false SIMH address conflict. This is compile-validated only; real receive
-interrupts and per-line guest dispatch still require a board probe.
+The DLI/DLO shim records the sparse line that caused an output request. Its
+single DLI DIB owns both read and write accesses; DLO is the companion logical
+device, not a second overlapping bus registration. Receive vectors are `0320`,
+`0340`, or `0360`; transmit vectors are four higher. This is compile-validated
+only; real receive interrupts and per-line guest dispatch still require a
+board probe. The transport remains a stub.
 
 ### Hardware candidates on hand
 

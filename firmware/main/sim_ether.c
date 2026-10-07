@@ -648,6 +648,12 @@ Packet format:
 //returns SCPE_OK on success, 1 on fail
 //calls routine with 0 on success
 t_stat eth_write (ETH_DEV* dev, ETH_PACK* packet, ETH_PCALLBACK routine) {
+	/* BOS6 uses a visible but unattached DEQNA.  Like host SIMH, report an
+	 * unattached transmit so XQ can complete it as a failed descriptor. */
+	if (!dev)
+		return SCPE_UNATT;
+	if (!packet)
+		return SCPE_ARG;
 
 	if ((packet->len >= ETH_MIN_PACKET) && (packet->len <= ETH_MAX_PACKET)) {
 		int loopback_self_frame = LOOPBACK_SELF_FRAME(packet->msg, packet->msg);
@@ -670,6 +676,9 @@ t_stat eth_write (ETH_DEV* dev, ETH_PACK* packet, ETH_PCALLBACK routine) {
 //calls routine with arg 0 when successful
 int eth_read (ETH_DEV* dev, ETH_PACK* packet, ETH_PCALLBACK routine) {
 //	printf("eth_read\n");
+	/* An unattached XQ has no receive source. */
+	if (!dev || !packet)
+		return 0;
 	dev->read_packet=packet;
 	dev->read_callback=routine;
 	int r=wifi_if_read(packet->msg, ETH_FRAME_SIZE);

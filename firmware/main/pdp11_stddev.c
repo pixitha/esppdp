@@ -63,6 +63,10 @@
 
 #include "pdp11_defs.h"
 #include "sim_term.h"
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#include "sim_hang_probe.h"
+#endif
 
 #define TTICSR_IMP      (CSR_DONE + CSR_IE)             /* terminal input */
 #define TTICSR_RW       (CSR_IE)
@@ -297,7 +301,13 @@ switch ((PA >> 1) & 01) {                               /* decode PA<1> */
         break;
 
     case 01:                                            /* tti buf */
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+        printf("[TTI read 0x%02x]\n", tti_unit.buf & 0377);
+#endif
         tti_csr = tti_csr & ~CSR_DONE;
+#ifdef ESP_PLATFORM
+        sim_hang_probe_tti_read();
+#endif
         CLR_INT (TTI);
         *data = tti_unit.buf & 0377;
         sim_activate_after_abs (&tti_unit, tti_unit.wait);  /* check soon for more input */
@@ -324,6 +334,16 @@ switch ((PA >> 1) & 01) {                               /* decode PA<1> */
         else if ((tti_csr & (CSR_DONE + CSR_IE)) == CSR_DONE)
             SET_INT (TTI);
         tti_csr = (tti_csr & ~TTICSR_RW) | (data & TTICSR_RW);
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+        {
+        static uint32 esp_tti_csr_trace_count;
+        if (esp_tti_csr_trace_count < 64) {
+            printf("[TTI CSR write #%u data=%06o now=%06o]\n",
+                   (unsigned)esp_tti_csr_trace_count++,
+                   (unsigned)data, (unsigned)tti_csr);
+            }
+        }
+#endif
         break;
 
     case 01:                                            /* tti buf */
@@ -346,9 +366,17 @@ int32 c;
 
 sim_clock_coschedule (uptr, tmxr_poll);                 /* continue poll */
 
+#ifdef ESP_PLATFORM
+/* The embedded console can be slower than the desktop SIMH polling cadence.
+ * Do not overwrite a pending DL11 character; retain it until the guest reads
+ * TTI BUF.  The desktop 500 ms escape hatch loses input on this target. */
+if (tti_csr & CSR_DONE)
+    return SCPE_OK;
+#else
 if ((tti_csr & CSR_DONE) &&                             /* input still pending and < 500ms? */
     ((sim_os_msec () - tti_buftime) < 500))
      return SCPE_OK;
+#endif
 #if defined(USE_DISPLAY)
 if (display_last_char) {
     c = display_last_char | SCPE_KFLAG;
@@ -371,8 +399,14 @@ else
 tti_buftime = sim_os_msec ();
 uptr->pos = uptr->pos + 1;
 tti_csr = tti_csr | CSR_DONE;
+#ifdef ESP_PLATFORM
+sim_hang_probe_tti_deliver();
+#endif
 if (tti_csr & CSR_IE)
     SET_INT (TTI);
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+printf("[TTI deliver 0x%02x CSR 0x%02x]\n", uptr->buf & 0377, tti_csr & 0377);
+#endif
 return SCPE_OK;
 }
 
@@ -506,12 +540,23 @@ return SCPE_OK;
 t_stat clk_wr (int32 data, int32 PA, int32 access)
 {
 int32 orig_csr = clk_csr;
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+static uint32 esp_clk_wr_trace_count;
+#endif
 
 if (clk_fnxm)                                           /* not there??? */
     return SCPE_NXM;
 if (PA & 1)
     return SCPE_OK;
 clk_csr = (clk_csr & ~CLKCSR_RW) | (data & CLKCSR_RW);
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+if (esp_clk_wr_trace_count < 32) {
+    printf("[CLK CSR write #%u data=%06o old=%06o new=%06o]\n",
+           (unsigned)esp_clk_wr_trace_count, (unsigned)data,
+           (unsigned)orig_csr, (unsigned)clk_csr);
+    esp_clk_wr_trace_count++;
+}
+#endif
 if (CPUT (HAS_LTCM) && ((data & CSR_DONE) == 0))        /* monitor bit? */
     clk_csr = clk_csr & ~CSR_DONE;                      /* clr if zero */
 if ((((clk_csr & CSR_IE) == 0) && !clk_fie) ||          /* unless IE+DONE */
@@ -528,6 +573,11 @@ return SCPE_OK;
 t_stat clk_svc (UNIT *uptr)
 {
 int32 t;
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+static uint32 esp_clk_trace_count;
+if ((++esp_clk_trace_count % 60) == 0)
+    printf("[CLK svc #%u csr=%06o]\n", (unsigned)esp_clk_trace_count, (unsigned)clk_csr);
+#endif
 
 clk_csr = clk_csr | CSR_DONE;                           /* set done */
 if ((clk_csr & CSR_IE) || clk_fie) {

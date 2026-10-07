@@ -1,8 +1,23 @@
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESPPDP_HW_S3_DEVKITC=y
+CONFIG_ESPPDP_BOOT_UNIX_V6=y
+# Keep temporary boot and throughput instrumentation out of normal builds.
+# CONFIG_ESPPDP_BOOT_TRACE is not set
+# CONFIG_ESPPDP_PERF_TRACE is not set
+CONFIG_ESPPDP_INITIAL_IPS=200000
+# Keep the diagnostic OLED console disabled during guest boot/performance work.
+# CONFIG_ESPPDP_OLED_TEST is not set
 # The N16R8 module uses 16 MB flash and octal 8 MB PSRAM.
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+# Use the DIO/80 MHz profile while validating this board.
+# The module's eFuse reports quad flash, but DIO avoids marginal quad-lane
+# reads until the hardware path is proven.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHFREQ="80m"
+# Avoid IDF 6 auto-detect changing the selected quad-flash profile.
+# CONFIG_ESPTOOLPY_FLASH_MODE_AUTO_DETECT is not set
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_TYPE_AUTO=y
@@ -11,3 +26,12 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+# This profile uses SD memory cards, not SDIO I/O devices. Skip CMD52 reset.
+# CONFIG_SD_ENABLE_SDIO_SUPPORT is not set
+# Keep UART0 as the primary console for compatibility with the board's
+# USB-UART connector, while mirroring output to native USB Serial/JTAG.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+# SIMH intentionally occupies CPU1; do not watchdog the CPU1 idle task.
+# CPU0 remains available for ESP-IDF services and is still watchdog checked.
+# CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set

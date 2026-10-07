@@ -3482,9 +3482,16 @@ for (tmr=0; tmr<=SIM_NTIMERS; tmr++) {
 sim_inst_per_sec_last = sim_precalibrate_ips;
 sim_idle_stable = 0;
 #else
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_INITIAL_IPS
+sim_precalibrate_ips = CONFIG_ESPPDP_INITIAL_IPS;
+#else
 sim_precalibrate_ips = 1000000;
+#endif
 sim_inst_per_sec_last = sim_precalibrate_ips;
 sim_idle_stable = 0;
+#if defined(ESP_PLATFORM)
+printf("SIMH initial instruction-rate estimate: %ld instr/s\n", (long)sim_precalibrate_ips);
+#endif
 #endif
 }
 

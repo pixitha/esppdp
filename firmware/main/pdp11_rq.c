@@ -1158,7 +1158,7 @@ DEVICE rq_dev = {
 
 MSC rqb_ctx = { 1 };
 
-const DIB rqb_dib = {
+DIB rqb_dib = {
     IOBA_AUTO, IOLN_RQ, &rq_rd, &rq_wr,
     1, IVCL (RQ), 0, { &rq_inta }, IOLN_RQ
     };

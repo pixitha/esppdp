@@ -76,9 +76,38 @@ Internal routines:
 
 #include "sim_defs.h"
 #include "sim_disk.h"
+#include <errno.h>
+#include "status_led.h"
 #include "sim_ether.h"
+#include "sdkconfig.h"
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+#include "sim_perf.h"
+#endif
 #include <ctype.h>
 #include <sys/stat.h>
+#ifdef ESP_PLATFORM
+#include "esp_timer.h"
+#endif
+
+#ifdef ESP_PLATFORM
+/* A disk transfer can span many sectors.  Refreshing the WS2812 for every
+ * sector is disproportionately expensive on the embedded target and can
+ * starve the SIMH event loop during a Unix boot. */
+static int64_t sim_disk_led_last_us;
+static void sim_disk_led_activity(void (*set_led)(void))
+{
+    int64_t now = esp_timer_get_time();
+    if ((now - sim_disk_led_last_us) >= 100000) {
+        set_led();
+        sim_disk_led_last_us = now;
+    }
+}
+#define STATUS_LED_READ()  sim_disk_led_activity(status_led_read)
+#define STATUS_LED_WRITE() sim_disk_led_activity(status_led_write)
+#else
+#define STATUS_LED_READ()  status_led_read()
+#define STATUS_LED_WRITE() status_led_write()
+#endif
 
 #define disk_ctx up8                        /* Field in Unit structure which points to the disk_context */
 
@@ -173,10 +202,12 @@ t_stat sim_disk_clr_async (UNIT *uptr) {
 
 /* Read Sectors */
 
-t_stat sim_disk_rdsect (UNIT *uptr, t_lba lba, uint8 *buf, t_seccnt *sectsread, t_seccnt sects) {
+static t_stat sim_disk_rdsect_impl (UNIT *uptr, t_lba lba, uint8 *buf, t_seccnt *sectsread, t_seccnt sects) {
+	STATUS_LED_READ();
 	t_offset da;
 	uint32 err, tbc;
 	size_t i;
+	int eintr_retries = 0;
 	struct disk_context *ctx = (struct disk_context *)uptr->disk_ctx;
 //	printf("sim_disk_rdsect(unit=%d, lba=0x%X, sects=%d)\n", (int)(uptr - ctx->dptr->units), lba, sects);
 
@@ -192,21 +223,49 @@ t_stat sim_disk_rdsect (UNIT *uptr, t_lba lba, uint8 *buf, t_seccnt *sectsread, 
 			printf("ERROR: fseek to %d: error %d\n", (int)da, err);
 			return SCPE_IOERR;
 		}
+		errno = 0;
 		i = fread(buf, 1, tbc, uptr->fileref);
+		if (i < tbc && ferror(uptr->fileref)) {
+			int stream_error = ferror(uptr->fileref);
+			int saved_errno = errno;
+			/* ferror() is a stream flag, not an errno value.  Retry only when
+			 * the underlying read actually reports EINTR. */
+			if (saved_errno == EINTR && eintr_retries++ < 4) {
+				clearerr(uptr->fileref);
+				da += i;
+				buf += i;
+				tbc -= i;
+				continue;
+			}
+			printf("ERROR: fread from %d: ferror %d errno %d\n",
+				(int)da, stream_error, saved_errno);
+			return SCPE_IOERR;
+		}
 		if (i < tbc) memset (&buf[i], 0, tbc-i);
 		if (sectsread) *sectsread += i / ctx->sector_size;
 		sectbytes = (i / ctx->sector_size) * ctx->sector_size;
-		err = ferror (uptr->fileref);
-		if (err) {
-			printf("ERROR: fread from %d: error %d\n", (int)da, err);
-			return SCPE_IOERR;
-		}
 		tbc -= sectbytes;
 		if ((tbc == 0) || (i == 0)) return SCPE_OK;
 		da += sectbytes;
 		buf += sectbytes;
 	}
 	return SCPE_OK;
+}
+
+t_stat sim_disk_rdsect (UNIT *uptr, t_lba lba, uint8 *buf, t_seccnt *sectsread, t_seccnt sects)
+{
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+	int64_t read_start_us = esp_timer_get_time();
+#endif
+	t_stat status = sim_disk_rdsect_impl(uptr, lba, buf, sectsread, sects);
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+	int64_t read_elapsed_us = esp_timer_get_time() - read_start_us;
+	struct disk_context *ctx = (struct disk_context *)uptr->disk_ctx;
+	size_t bytes = (size_t)(sectsread ? *sectsread : (status == SCPE_OK ? sects : 0)) * ctx->sector_size;
+	if (read_elapsed_us > 0)
+		sim_perf_note_disk_read(bytes, (uint32_t)read_elapsed_us);
+#endif
+	return status;
 }
 
 t_stat sim_disk_rdsect_a (UNIT *uptr, t_lba lba, uint8 *buf, t_seccnt *sectsread, t_seccnt sects, DISK_PCALLBACK callback) {
@@ -218,9 +277,18 @@ t_stat sim_disk_rdsect_a (UNIT *uptr, t_lba lba, uint8 *buf, t_seccnt *sectsread
 /* Write Sectors */
 
 t_stat sim_disk_wrsect (UNIT *uptr, t_lba lba, uint8 *buf, t_seccnt *sectswritten, t_seccnt sects) {
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+	int64_t write_start_us = esp_timer_get_time();
+#endif
+	STATUS_LED_WRITE();
 	t_offset da;
-	uint32 err, tbc;
+	uint32 tbc;
 	size_t i;
+	int attempt;
+	const char *last_stage = "none";
+	int last_stream_error = 0;
+	int last_errno = 0;
+	size_t last_written = 0;
 	struct disk_context *ctx = (struct disk_context *)uptr->disk_ctx;
 
 //	printf("_sim_disk_wrsect(unit=%d, lba=0x%X, sects=%d)\n", (int)(uptr - ctx->dptr->units), lba, sects);
@@ -228,15 +296,60 @@ t_stat sim_disk_wrsect (UNIT *uptr, t_lba lba, uint8 *buf, t_seccnt *sectswritte
 	da = ((t_offset)lba) * ctx->sector_size;
 	tbc = sects * ctx->sector_size;
 	if (sectswritten) *sectswritten = 0;
-	err = fseek(uptr->fileref, da, SEEK_SET);          /* set pos */
-	if (err) return SCPE_IOERR;
-	i = fwrite(buf, ctx->xfer_element_size, tbc/ctx->xfer_element_size, uptr->fileref);
-	if (sectswritten) {
-		*sectswritten += (t_seccnt)((i * ctx->xfer_element_size + ctx->sector_size - 1)/ctx->sector_size);
+	for (attempt = 0; attempt < 5; attempt++) {
+		int stream_error, saved_errno;
+
+		clearerr(uptr->fileref);
+		errno = 0;
+		last_stage = "seek";
+		if (fseek(uptr->fileref, da, SEEK_SET) != 0) {
+			stream_error = ferror(uptr->fileref);
+			saved_errno = errno;
+			last_stream_error = stream_error;
+			last_errno = saved_errno;
+			last_written = 0;
+			if (saved_errno == EINTR)
+				continue;
+			break;
+		}
+
+		errno = 0;
+		last_stage = "write";
+		i = fwrite(buf, ctx->xfer_element_size,
+				  tbc / ctx->xfer_element_size, uptr->fileref);
+		stream_error = ferror(uptr->fileref);
+		saved_errno = errno;
+		last_stream_error = stream_error;
+		last_errno = saved_errno;
+		last_written = i * ctx->xfer_element_size;
+		if (i == (tbc / ctx->xfer_element_size) && stream_error == 0) {
+			errno = 0;
+			last_stage = "flush";
+			if (fflush(uptr->fileref) == 0) {
+				if (sectswritten)
+					*sectswritten = sects;
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+				sim_perf_note_disk_write(tbc, (uint32_t)(esp_timer_get_time() - write_start_us));
+#endif
+				return SCPE_OK;
+			}
+			stream_error = ferror(uptr->fileref);
+			saved_errno = errno;
+			last_stream_error = stream_error;
+			last_errno = saved_errno;
+		}
+		if (saved_errno == EINTR)
+			continue;
+		break;
 	}
-	err = ferror (uptr->fileref);
-	if (err) return SCPE_IOERR;
-	return SCPE_OK;
+	printf("ERROR: RK write at %d failed during %s after %d attempt%s: requested %u bytes, wrote %u, ferror flag %d errno %d\n",
+		(int)da, last_stage, attempt + (attempt < 5),
+		(attempt + (attempt < 5)) == 1 ? "" : "s", (unsigned)tbc,
+		(unsigned)last_written, last_stream_error, last_errno);
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+	sim_perf_note_disk_write(last_written, (uint32_t)(esp_timer_get_time() - write_start_us));
+#endif
+	return SCPE_IOERR;
 }
 
 t_stat sim_disk_wrsect_a (UNIT *uptr, t_lba lba, uint8 *buf, t_seccnt *sectswritten, t_seccnt sects, DISK_PCALLBACK callback) {

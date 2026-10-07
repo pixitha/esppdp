@@ -19,6 +19,7 @@
 #include "esp_vfs.h"
 #include "esp_vfs_dev.h"
 #include "sdkconfig.h"
+#include "oled_ssd1306.h"
 
 #include "esp_log.h"
 #define TAG "ie15lcd"
@@ -540,10 +541,22 @@ static void ie15_task(void *ptr) {
 }
 
 void ie15_init(void) {
+#ifdef NO_DISPLAY
+	return;
+#else
 	ie15rb=xRingbufferCreate(8, RINGBUF_TYPE_BYTEBUF);
 	xTaskCreatePinnedToCore(ie15_task, "ie15", 4096, NULL, 4, NULL, 1);
+#endif
 }
 
 void ie15_sendchar(char c) {
+#ifdef NO_DISPLAY
+	#if CONFIG_ESPPDP_OLED_TEST
+	 oled_ssd1306_console_putc(c);
+	#else
+	 (void)c;
+	#endif
+#else
 	xRingbufferSend(ie15rb, &c, 1, portMAX_DELAY);
+#endif
 }

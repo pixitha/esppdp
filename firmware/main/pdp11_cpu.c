@@ -232,6 +232,15 @@
 #include "pdp11_cpumod.h"
 #include "sim_term.h"
 #include "esp_attr.h"
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#if CONFIG_ESPPDP_BOOT_TRACE || CONFIG_ESPPDP_PERF_TRACE
+#include "esp_timer.h"
+#endif
+#endif
+#include "sim_evtq.h"
+#include "sim_perf.h"
+#include "sim_hang_probe.h"
 
 #define PCQ_SIZE        64                              /* must be 2**n */
 #define PCQ_MASK        (PCQ_SIZE - 1)
@@ -371,6 +380,387 @@ extern t_stat iopageR (int32 *data, uint32 addr, int32 access);
 extern t_stat iopageW (int32 data, uint32 addr, int32 access);
 extern int32 calc_ints (int32 nipl, int32 trq);
 extern int32 get_vector (int32 nipl);
+
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+/* Keep a small instruction window so faults can be diagnosed without
+ * streaming every instruction over the slow UART. */
+typedef struct {
+    uint16 pc, ir, psw, mmr0;
+    uint16 r[6], sp;
+} ESP_INSN_TRACE;
+typedef struct {
+    uint16 pc, ir;
+    uint32 count;
+} ESP_PC_HOTSPOT;
+static ESP_INSN_TRACE esp_insn_trace[24];
+static ESP_PC_HOTSPOT esp_pc_hotspots[64];
+static uint32 esp_insn_trace_next;
+static uint32 esp_mmu_fault_trace_count;
+static uint32 esp_low_pc_window_hits;
+static t_bool esp_low_pc_window_reported;
+static uint32 esp_hot_loop_hits;
+static t_bool esp_hot_loop_reported;
+static uint16 esp_clear_loop_last_r0;
+static uint32 esp_clear_loop_restart_count;
+static t_bool esp_clear_loop_seen;
+static uint32 esp_clear_exit_trace_count;
+static uint32 esp_clear_boundary_exit_trace_count;
+static uint32 esp_clear_exit_capture;
+static t_bool esp_clear_exit_capture_active;
+static uint32 esp_clear_second_exit_trace_count;
+static uint32 esp_clear_second_exit_capture;
+static t_bool esp_clear_second_exit_capture_active;
+static uint32 esp_init_entry_trace_count;
+static uint32 esp_last_trap_seq;
+static uint32 esp_last_trap_insn_seq;
+static uint16 esp_last_trap_vector;
+static uint16 esp_last_trap_old_pc;
+static uint16 esp_last_trap_new_pc;
+static uint16 esp_last_trap_old_psw;
+static int esp_last_trap_kind;
+
+static void esp_trace_instruction (uint16 pc, uint16 ir, uint16 psw)
+{
+ESP_INSN_TRACE *entry = &esp_insn_trace[esp_insn_trace_next % 24];
+ESP_INSN_TRACE *previous;
+uint32 period, k;
+uint32 loop_period = 0;
+uint32 hash;
+entry->pc = pc;
+entry->ir = ir;
+entry->psw = psw;
+entry->mmr0 = (uint16)MMR0;
+entry->r[0] = (uint16)R[0];
+entry->r[1] = (uint16)R[1];
+entry->r[2] = (uint16)R[2];
+entry->r[3] = (uint16)R[3];
+entry->r[4] = (uint16)R[4];
+entry->r[5] = (uint16)R[5];
+entry->sp = (uint16)SP;
+esp_insn_trace_next++;
+previous = (esp_insn_trace_next > 1) ?
+           &esp_insn_trace[(esp_insn_trace_next - 2) % 24] : NULL;
+
+/* BOS6's .INIT starts with MOV #STACK,SP at kernel virtual PC 001040.
+   Other address spaces can execute unrelated code at the same virtual PC. */
+if (esp_clear_boundary_exit_trace_count && (pc == 001040) &&
+    (((psw >> PSW_V_CM) & 03) == MD_KER) && (ir == 012706) &&
+    (esp_init_entry_trace_count < 6)) {
+    uint32 count = (esp_insn_trace_next < 24) ? esp_insn_trace_next : 24;
+    uint32 start = esp_insn_trace_next - count;
+    uint32 i;
+    printf("[CPU INIT entry #%u pc=%06o ir=%06o psw=%06o r0=%06o sp=%06o mmr0=%06o mmr3=%06o trap_req=%08o last_trap_seq=%u trap_age_instr=%u vector=%06o old_pc=%06o new_pc=%06o old_psw=%06o kind=%d]\n",
+           (unsigned)++esp_init_entry_trace_count, (unsigned)pc,
+           (unsigned)ir, (unsigned)psw, (unsigned)R[0], (unsigned)SP,
+           (unsigned)MMR0, (unsigned)MMR3, (unsigned)trap_req,
+           (unsigned)esp_last_trap_seq,
+           (unsigned)(esp_insn_trace_next - esp_last_trap_insn_seq),
+           (unsigned)esp_last_trap_vector,
+           (unsigned)esp_last_trap_old_pc,
+           (unsigned)esp_last_trap_new_pc,
+           (unsigned)esp_last_trap_old_psw, esp_last_trap_kind);
+    for (i = 0; i < count; i++) {
+        ESP_INSN_TRACE *hist = &esp_insn_trace[(start + i) % 24];
+        printf("[CPU INIT path pc=%06o ir=%06o psw=%06o r0=%06o sp=%06o]%s\n",
+               (unsigned)hist->pc, (unsigned)hist->ir,
+               (unsigned)hist->psw, (unsigned)hist->r[0],
+               (unsigned)hist->sp,
+               (i + 1 == count) ? " <-- INIT" : "");
+    }
+}
+
+/* BLOS at 002050 should leave the clear loop once R0 exceeds its limit.
+   Capture the following instructions to expose where the guest goes next. */
+if (!esp_clear_exit_capture_active && previous &&
+    (previous->pc == 002050) && (pc != 002042) &&
+    (esp_clear_exit_trace_count < 4)) {
+    esp_clear_exit_trace_count++;
+    esp_clear_exit_capture = 32;
+    esp_clear_exit_capture_active = TRUE;
+    printf("[CPU clear-loop exit #%u pc=%06o ir=%06o r0=%06o previous_r0=%06o psw=%06o mmr0=%06o mmr1=%06o mmr2=%06o mmr3=%06o]\n",
+           (unsigned)esp_clear_exit_trace_count, (unsigned)pc,
+           (unsigned)ir, (unsigned)R[0], (unsigned)previous->r[0],
+           (unsigned)psw, (unsigned)MMR0, (unsigned)MMR1,
+           (unsigned)MMR2, (unsigned)MMR3);
+}
+/* The generic exit quota can be consumed before the MMU-enabled pass starts.
+   Specifically record a real boundary exit from the BOS6 memory-clear loop. */
+if (!esp_clear_exit_capture_active && previous &&
+    (MMR0 & MMR0_MME) && (previous->pc == 002050) &&
+    (pc != 002042) && (previous->r[0] >= 0157770) &&
+    (esp_clear_boundary_exit_trace_count < 4)) {
+    esp_clear_boundary_exit_trace_count++;
+    esp_clear_exit_capture = 24;
+    esp_clear_exit_capture_active = TRUE;
+    printf("[CPU clear-boundary exit #%u pc=%06o ir=%06o previous_pc=%06o previous_ir=%06o previous_r0=%06o r0=%06o previous_psw=%06o psw=%06o mmr0=%06o mmr1=%06o mmr2=%06o mmr3=%06o]\n",
+           (unsigned)esp_clear_boundary_exit_trace_count, (unsigned)pc,
+           (unsigned)ir, (unsigned)previous->pc, (unsigned)previous->ir,
+           (unsigned)previous->r[0], (unsigned)R[0],
+           (unsigned)previous->psw, (unsigned)psw, (unsigned)MMR0,
+           (unsigned)MMR1, (unsigned)MMR2, (unsigned)MMR3);
+}
+if (esp_clear_exit_capture_active && (esp_clear_exit_capture > 0)) {
+    printf("[CPU clear-exit path pc=%06o ir=%06o psw=%06o r0=%06o r1=%06o r2=%06o r3=%06o sp=%06o]\n",
+           (unsigned)pc, (unsigned)ir, (unsigned)psw,
+           (unsigned)R[0], (unsigned)R[1], (unsigned)R[2],
+           (unsigned)R[3], (unsigned)SP);
+    esp_clear_exit_capture--;
+    if ((esp_clear_exit_capture == 0) || (pc == 002042))
+        esp_clear_exit_capture_active = FALSE;
+}
+/* BOS6 follows the first clear pass with another CLR/CMP/BCS loop at
+   002056-002064. Trace its actual boundary exit independently. */
+if (!esp_clear_second_exit_capture_active && previous &&
+    (MMR0 & MMR0_MME) && (previous->pc == 002064) &&
+    (pc != 002056) &&
+    (esp_clear_second_exit_trace_count < 4)) {
+    esp_clear_second_exit_trace_count++;
+    esp_clear_second_exit_capture = 80;
+    esp_clear_second_exit_capture_active = TRUE;
+    printf("[CPU clear-second exit #%u pc=%06o ir=%06o previous_pc=%06o previous_ir=%06o previous_r0=%06o r0=%06o previous_psw=%06o psw=%06o mmr0=%06o mmr1=%06o mmr2=%06o mmr3=%06o]\n",
+           (unsigned)esp_clear_second_exit_trace_count, (unsigned)pc,
+           (unsigned)ir, (unsigned)previous->pc, (unsigned)previous->ir,
+           (unsigned)previous->r[0], (unsigned)R[0],
+           (unsigned)previous->psw, (unsigned)psw, (unsigned)MMR0,
+           (unsigned)MMR1, (unsigned)MMR2, (unsigned)MMR3);
+}
+if (esp_clear_second_exit_capture_active &&
+    (esp_clear_second_exit_capture > 0)) {
+    printf("[CPU clear-second path pc=%06o ir=%06o psw=%06o r0=%06o r1=%06o r2=%06o r3=%06o sp=%06o]\n",
+           (unsigned)pc, (unsigned)ir, (unsigned)psw,
+           (unsigned)R[0], (unsigned)R[1], (unsigned)R[2],
+           (unsigned)R[3], (unsigned)SP);
+    esp_clear_second_exit_capture--;
+    if ((esp_clear_second_exit_capture == 0) || (pc == 002056))
+        esp_clear_second_exit_capture_active = FALSE;
+}
+
+/* Keep a compact instruction-frequency sketch for the next five-second
+   heartbeat. This exposes hot code even when registers change in a loop. */
+hash = ((uint32)(pc >> 1) ^ (uint32)(pc >> 7) ^
+        (uint32)(pc >> 11)) & 63;
+if (esp_pc_hotspots[hash].pc != pc) {
+    esp_pc_hotspots[hash].pc = pc;
+    esp_pc_hotspots[hash].ir = ir;
+    esp_pc_hotspots[hash].count = 0;
+}
+esp_pc_hotspots[hash].ir = ir;
+esp_pc_hotspots[hash].count++;
+
+/* The image-clear loop at 002042 should move R0 forward toward 160000.
+   If execution re-enters it with R0 moving backward, preserve the preceding
+   instruction window to show whether a trap/restart path brought it back. */
+if ((MMR0 & MMR0_MME) && (pc == 002042)) {
+    if (esp_clear_loop_seen && ((uint16)R[0] < esp_clear_loop_last_r0) &&
+        (esp_clear_loop_restart_count < 4)) {
+        uint32 count = (esp_insn_trace_next < 16) ?
+                       esp_insn_trace_next : 16;
+        uint32 start = esp_insn_trace_next - count;
+        uint32 i;
+        printf("[CPU clear-loop restart #%u prev_r0=%06o r0=%06o pc=%06o psw=%06o mmr0=%06o mmr1=%06o mmr2=%06o mmr3=%06o ipl=%o trap_req=%08o KIP6=%06o/%06o KIP7=%06o/%06o KDP6=%06o/%06o KDP7=%06o/%06o]\n",
+               (unsigned)++esp_clear_loop_restart_count,
+               (unsigned)esp_clear_loop_last_r0, (unsigned)R[0],
+               (unsigned)pc, (unsigned)psw, (unsigned)MMR0,
+               (unsigned)MMR1, (unsigned)MMR2, (unsigned)MMR3,
+               (unsigned)ipl, (unsigned)trap_req,
+               (unsigned)((APRFILE[6] >> 16) & 0177777),
+               (unsigned)(APRFILE[6] & 0177777),
+               (unsigned)((APRFILE[7] >> 16) & 0177777),
+               (unsigned)(APRFILE[7] & 0177777),
+               (unsigned)((APRFILE[16] >> 16) & 0177777),
+               (unsigned)(APRFILE[16] & 0177777),
+               (unsigned)((APRFILE[17] >> 16) & 0177777),
+               (unsigned)(APRFILE[17] & 0177777));
+        for (i = 0; i < count; i++) {
+            ESP_INSN_TRACE *hist = &esp_insn_trace[(start + i) % 24];
+            printf("[CPU clear-loop hist pc=%06o ir=%06o psw=%06o r0=%06o r1=%06o r2=%06o sp=%06o]%s\n",
+                   (unsigned)hist->pc, (unsigned)hist->ir,
+                   (unsigned)hist->psw, (unsigned)hist->r[0],
+                   (unsigned)hist->r[1], (unsigned)hist->r[2],
+                   (unsigned)hist->sp,
+                   (i + 1 == count) ? " <-- current" : "");
+        }
+    }
+    esp_clear_loop_last_r0 = (uint16)R[0];
+    esp_clear_loop_seen = TRUE;
+}
+
+/* Identify a stalled tight loop anywhere in the guest, not just the early
+   low-PC window. Require both instructions and register state to repeat, so
+   progressing loops (for example memory clear/scan loops) are not mislabeled. */
+if (!esp_hot_loop_reported && (MMR0 & MMR0_MME) &&
+    ((esp_insn_trace_next & 01777) == 0) &&
+    (esp_insn_trace_next >= 16)) {
+    for (period = 1; period <= 8 && loop_period == 0; period++) {
+        t_bool matches = TRUE;
+        for (k = 0; k < period; k++) {
+            ESP_INSN_TRACE *recent = &esp_insn_trace[
+                (esp_insn_trace_next - 1 - k) % 24];
+            ESP_INSN_TRACE *prior = &esp_insn_trace[
+                (esp_insn_trace_next - 1 - period - k) % 24];
+            if ((recent->pc != prior->pc) || (recent->ir != prior->ir)) {
+                matches = FALSE;
+                break;
+            }
+            if ((recent->sp != prior->sp) ||
+                (recent->r[0] != prior->r[0]) ||
+                (recent->r[1] != prior->r[1]) ||
+                (recent->r[2] != prior->r[2]) ||
+                (recent->r[3] != prior->r[3]) ||
+                (recent->r[4] != prior->r[4]) ||
+                (recent->r[5] != prior->r[5])) {
+                matches = FALSE;
+                break;
+            }
+        }
+        if (matches)
+            loop_period = period;
+    }
+    if (loop_period != 0) {
+        esp_hot_loop_hits++;
+        if (esp_hot_loop_hits >= 128) {
+            uint32 count = (esp_insn_trace_next < 24) ?
+                           esp_insn_trace_next : 24;
+            uint32 start = esp_insn_trace_next - count;
+            uint32 i;
+            printf("[CPU hot-loop period=%u repeated-instruction-samples=%u pc=%06o ir=%06o psw=%06o mmr0=%06o mmr1=%06o mmr2=%06o mmr3=%06o ipl=%o trap_req=%08o]\n",
+                   (unsigned)loop_period, (unsigned)esp_hot_loop_hits,
+                   (unsigned)pc, (unsigned)ir, (unsigned)psw,
+                   (unsigned)MMR0, (unsigned)MMR1, (unsigned)MMR2,
+                   (unsigned)MMR3, (unsigned)ipl, (unsigned)trap_req);
+            printf("[CPU hot-loop regs r0=%06o r1=%06o r2=%06o r3=%06o r4=%06o r5=%06o sp=%06o]\n",
+                   (unsigned)R[0], (unsigned)R[1], (unsigned)R[2],
+                   (unsigned)R[3], (unsigned)R[4], (unsigned)R[5],
+                   (unsigned)SP);
+            for (i = 0; i < count; i++) {
+                ESP_INSN_TRACE *hist = &esp_insn_trace[(start + i) % 24];
+                printf("[CPU hot-loop hist pc=%06o ir=%06o psw=%06o mmr0=%06o]%s\n",
+                       (unsigned)hist->pc, (unsigned)hist->ir,
+                       (unsigned)hist->psw, (unsigned)hist->mmr0,
+                       (i + 1 == count) ? " <-- current" : "");
+            }
+            esp_hot_loop_reported = TRUE;
+        }
+    } else {
+        esp_hot_loop_hits = 0;
+    }
+}
+
+/* The BOS6 ESP trace repeatedly lands in this low-PC loop after DMV
+   initialization.  Dump the recent instruction ring once it has revisited
+   the window enough times to distinguish a transient entry from a loop. */
+if (!esp_low_pc_window_reported && (MMR0 & MMR0_MME) &&
+    (pc >= 002040) && (pc <= 002060) &&
+    (++esp_low_pc_window_hits >= 64)) {
+    uint32 count = (esp_insn_trace_next < 24) ? esp_insn_trace_next : 24;
+    uint32 start = esp_insn_trace_next - count;
+    uint32 i;
+
+    printf("[CPU low-PC loop pc=%06o ir=%06o psw=%06o mmr0=%06o mmr1=%06o mmr2=%06o mmr3=%06o ipl=%o trap_req=%08o hits=%u]\n",
+           (unsigned)pc, (unsigned)ir, (unsigned)psw,
+           (unsigned)MMR0, (unsigned)MMR1, (unsigned)MMR2,
+           (unsigned)MMR3, (unsigned)ipl, (unsigned)trap_req,
+           (unsigned)esp_low_pc_window_hits);
+    printf("[CPU low-PC regs r0=%06o r1=%06o r2=%06o r3=%06o r4=%06o r5=%06o sp=%06o]\n",
+           (unsigned)R[0], (unsigned)R[1], (unsigned)R[2],
+           (unsigned)R[3], (unsigned)R[4], (unsigned)R[5],
+           (unsigned)SP);
+    for (i = 0; i < count; i++) {
+        ESP_INSN_TRACE *hist = &esp_insn_trace[(start + i) % 24];
+        printf("[CPU low-PC hist pc=%06o ir=%06o psw=%06o mmr0=%06o]%s\n",
+               (unsigned)hist->pc, (unsigned)hist->ir,
+               (unsigned)hist->psw, (unsigned)hist->mmr0,
+               (i + 1 == count) ? " <-- current" : "");
+    }
+    esp_low_pc_window_reported = TRUE;
+}
+}
+
+static void esp_trace_report_hotspots (void)
+{
+uint32 rank, slot;
+for (rank = 0; rank < 8; rank++) {
+    uint32 best = 0;
+    for (slot = 0; slot < 64; slot++) {
+        if (esp_pc_hotspots[slot].count > best)
+            best = esp_pc_hotspots[slot].count;
+    }
+    if (best == 0)
+        break;
+    for (slot = 0; slot < 64; slot++) {
+        if (esp_pc_hotspots[slot].count == best) {
+            printf("[CPU pc-hotspot rank=%u pc=%06o ir=%06o samples=%u]\n",
+                   (unsigned)(rank + 1), (unsigned)esp_pc_hotspots[slot].pc,
+                   (unsigned)esp_pc_hotspots[slot].ir, (unsigned)best);
+            esp_pc_hotspots[slot].count = 0;
+            break;
+        }
+    }
+}
+for (slot = 0; slot < 64; slot++)
+    esp_pc_hotspots[slot].count = 0;
+}
+
+static void esp_trace_mmu_fault (int32 err, int32 apridx)
+{
+uint32 start, count, i;
+
+/* The BOS6 startup clear loop crosses the 0160000 virtual-page boundary.
+   Keep a separate allowance for faults there; the generic startup probes
+   can otherwise consume the small global fault-trace budget first. */
+if (((inst_pc >= 002042) && (inst_pc <= 002050)) ||
+    ((inst_pc >= 002056) && (inst_pc <= 002064))) {
+    static uint32 esp_clear_loop_fault_count;
+    if (esp_clear_loop_fault_count < 8) {
+        printf("[CPU clear-pass MMU fault #%u err=%06o apr=%02o pdr=%06o par=%06o inst_pc=%06o pc=%06o r0=%06o psw=%06o mmr0=%06o mmr1=%06o mmr2=%06o mmr3=%06o last_pa=%08o]\n",
+               (unsigned)esp_clear_loop_fault_count++, (unsigned)err,
+               (unsigned)apridx, (unsigned)(APRFILE[apridx] & 0177777),
+               (unsigned)((APRFILE[apridx] >> 16) & 0177777),
+               (unsigned)inst_pc, (unsigned)PC, (unsigned)R[0],
+               (unsigned)get_PSW(), (unsigned)MMR0, (unsigned)MMR1,
+               (unsigned)MMR2, (unsigned)MMR3, (unsigned)last_pa);
+    }
+    return;
+}
+
+if (esp_mmu_fault_trace_count >= 2)
+    return;
+printf("[MMU fault #%u err=%06o apr=%02o pdr=%06o par=%06o inst_pc=%06o pc=%06o psw=%06o mmr0=%06o mmr1=%06o mmr2=%06o mmr3=%06o last_pa=%08o]\n",
+       (unsigned)esp_mmu_fault_trace_count++, (unsigned)err,
+       (unsigned)apridx, (unsigned)(APRFILE[apridx] & 0177777),
+       (unsigned)((APRFILE[apridx] >> 16) & 0177777), (unsigned)inst_pc,
+       (unsigned)PC, (unsigned)get_PSW(),
+       (unsigned)MMR0, (unsigned)MMR1, (unsigned)MMR2,
+       (unsigned)MMR3, (unsigned)last_pa);
+count = (esp_insn_trace_next < 24) ? esp_insn_trace_next : 24;
+start = esp_insn_trace_next - count;
+for (i = 0; i < count; i++) {
+    ESP_INSN_TRACE *entry = &esp_insn_trace[(start + i) % 24];
+    printf("[MMU hist pc=%06o ir=%06o psw=%06o mmr0=%06o]%s\n",
+           (unsigned)entry->pc, (unsigned)entry->ir,
+           (unsigned)entry->psw, (unsigned)entry->mmr0,
+           (i + 1 == count) ? " <-- last" : "");
+    }
+}
+
+/* Record rejected bus addresses at the access point. Bound the output in case
+ * an exception handler retries the same access indefinitely. */
+static void esp_trace_nxm (const char *op, int32 pa)
+{
+static uint32 count;
+
+if (count < 24) {
+    printf("[NXM #%u %s pa=%08o inst=%06o pc=%06o psw=%06o mmr0=%06o mmr1=%06o mmr2=%06o mem=%u]\n",
+           (unsigned) count, op, (unsigned) pa,
+           (unsigned) inst_pc, (unsigned) PC, (unsigned) get_PSW (),
+           (unsigned) MMR0, (unsigned) MMR1, (unsigned) MMR2,
+           (unsigned) MEMSIZE);
+    count++;
+    }
+}
+#else
+#define esp_trace_nxm(op, pa) ((void) 0)
+#endif
 
 /* Trap data structures */
 
@@ -709,6 +1099,17 @@ t_stat IRAM_ATTR sim_instr (void)
 int abortval, i;
 volatile int32 trapea;                                  /* used by setjmp */
 InstHistory *hst_ent = NULL;
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+static uint32_t esp_perf_instruction_count;
+static int64_t esp_perf_wait_since_us;
+#endif
+
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+esp_perf_wait_since_us = 0;
+#endif
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_HANG_PROBE
+static uint32_t esp_probe_instruction_count;
+#endif
 
 sim_vm_pc_value = &pdp11_pc_value;
 
@@ -799,7 +1200,8 @@ else {
             (CPUT (STOP_STKA) || stop_spabort))
             reason = STOP_SPABORT;
         if (trapea == ~MD_KER) {                        /* kernel stk abort? */
-            setTRAP (TRAP_RED);
+            trap_req = trap_req & ~trap_clear[TRAP_RED];/* clear all traps */
+            setTRAP (TRAP_RED);                         /* set red stack trap */
             setCPUERR (CPUE_RED);
             STACKFILE[MD_KER] = 4;
             if (cm == MD_KER)
@@ -837,7 +1239,38 @@ while (reason == 0)  {
 //        pcq_r->qptr = pcq_p;                            /* update pc q ptr */
         set_r_display (rs, cm);
 
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+        /* Emit a low-rate snapshot after guest state is made coherent.  It
+         * lets an embedded boot hang be identified without turning the CPU
+         * instruction loop into a serial-log workload. */
+        {
+        static int64_t esp_heartbeat_last_us;
+        int64_t esp_heartbeat_now_us = esp_timer_get_time();
+        if ((esp_heartbeat_now_us - esp_heartbeat_last_us) >= 5000000) {
+            printf("[CPU heartbeat pc=%06o psw=%06o mmr0=%06o r0=%06o r1=%06o r2=%06o r3=%06o r4=%06o r5=%06o sp=%06o]\n",
+                   (unsigned)saved_PC, (unsigned)PSW, (unsigned)MMR0,
+                   (unsigned)R[0], (unsigned)R[1], (unsigned)R[2],
+                   (unsigned)R[3], (unsigned)R[4], (unsigned)R[5],
+                   (unsigned)SP);
+            esp_trace_report_hotspots ();
+            esp_heartbeat_last_us = esp_heartbeat_now_us;
+            }
+        }
+#endif
+
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+        int64_t esp_perf_event_start_us = esp_timer_get_time();
+        if (esp_perf_wait_since_us != 0) {
+            sim_perf_note_wait((uint32_t)(esp_perf_event_start_us - esp_perf_wait_since_us));
+            esp_perf_wait_since_us = 0;
+        }
+#endif
         reason = sim_process_event ();                  /* process events */
+
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+        sim_perf_note_event((uint32_t)(esp_timer_get_time() - esp_perf_event_start_us));
+        sim_perf_checkpoint (esp_perf_instruction_count, (uint16)saved_PC);
+#endif
 
         /* restore simh register contents into running variables */
         PC = saved_PC;
@@ -872,6 +1305,21 @@ while (reason == 0)  {
             trapea = get_vector (ipl);                  /* get int vector */
             trapnum = TRAP_V_MAX;                       /* defang stk trap */
             }                                           /* end else t */
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+        {
+        static uint32 esp_trap_trace_count;
+        if ((trapea != 0) && (esp_trap_trace_count < 24)) {
+            printf("[CPU trap #%u kind=%d vector=%06o pc=%06o sp=%06o mmr0=%06o]\n",
+                   (unsigned)esp_trap_trace_count, (int)trapnum,
+                   (unsigned)trapea, (unsigned)PC, (unsigned)SP,
+                   (unsigned)MMR0);
+            printf("[CPU irq state trap_req=%08o pirq=%06o ipl=%o psw=%06o]\n",
+                   (unsigned)trap_req, (unsigned)PIRQ, (unsigned)ipl,
+                   (unsigned)get_PSW());
+            esp_trap_trace_count++;
+            }
+        }
+#endif
         if (trapea == 0) {                              /* nothing to do? */
             trap_req = calc_ints (ipl, 0);              /* recalculate */
             continue;                                   /* back to fetch */
@@ -904,8 +1352,16 @@ while (reason == 0)  {
             }
         src = ReadCW (trapea | calc_ds (MD_KER));       /* new PC */
         src2 = ReadCW ((trapea + 2) | calc_ds (MD_KER)); /* new PSW */
-        src2 = src2 & cpu_tab[cpu_model].psw;            /* mask invalid PSW bits */
-        src2 = src2 & cpu_tab[cpu_model].psw;           /* mask invalid PSW bits */
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+        esp_last_trap_seq++;
+        esp_last_trap_insn_seq = esp_insn_trace_next;
+        esp_last_trap_vector = (uint16)trapea;
+        esp_last_trap_old_pc = (uint16)PC;
+        esp_last_trap_new_pc = (uint16)src;
+        esp_last_trap_old_psw = (uint16)PSW;
+        esp_last_trap_kind = trapnum;
+#endif
+        src2 = src2 & cpu_tab[cpu_model].psw;           /* mask off invalid bits */
         t = (src2 >> PSW_V_CM) & 03;                    /* new cm */
         trapea = ~t;                                    /* flag pushes */
         WriteCW (PSW, ((STACKFILE[t] - 2) & 0177777) | calc_ds (t));
@@ -934,7 +1390,17 @@ while (reason == 0)  {
 
     if (tbit)
         setTRAP (TRAP_TRC);
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+    if (!wait_state && esp_perf_wait_since_us != 0) {
+        sim_perf_note_wait((uint32_t)(esp_timer_get_time() - esp_perf_wait_since_us));
+        esp_perf_wait_since_us = 0;
+    }
+#endif
     if (wait_state) {                                   /* wait state? */
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+        if (esp_perf_wait_since_us == 0)
+            esp_perf_wait_since_us = esp_timer_get_time();
+#endif
         sim_idle (TMR_CLK, TRUE);
         continue;
         }
@@ -959,6 +1425,18 @@ while (reason == 0)  {
         MMR2 = PC;
         }
     IR = ReadE (PC | isenable);                         /* fetch instruction */
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_HANG_PROBE
+    if (((++esp_probe_instruction_count) & 4095u) == 0)
+        sim_hang_probe_instruction(esp_probe_instruction_count, (uint16_t)inst_pc);
+#endif
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+    esp_trace_instruction ((uint16)inst_pc, (uint16)IR, (uint16)inst_psw);
+#endif
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_PERF_TRACE
+    ++esp_perf_instruction_count;
+    if ((esp_perf_instruction_count & 4095u) == 0)
+        sim_perf_note_pc((uint16_t)inst_pc, (uint16_t)IR);
+#endif
     sim_interval = sim_interval - 1;
     srcspec = (IR >> 6) & 077;                          /* src, dst specs */
     dstspec = IR & 077;
@@ -1021,7 +1499,22 @@ while (reason == 0)  {
                 break;
             case 5:                                     /* RESET */
                 if (cm == MD_KER) {
-                    reset_all (2);                      /* skip CPU, sys reg */
+                    t_stat reset_status = reset_all (2); /* skip CPU, sys reg */
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+                    if (esp_clear_boundary_exit_trace_count &&
+                        (inst_pc == 001044)) {
+                        static uint32 esp_init_reset_trace_count;
+                        if (esp_init_reset_trace_count < 8) {
+                            printf("[CPU INIT RESET #%u inst_pc=%06o ir=%06o psw=%06o sp=%06o status=%d mmr0_before=%06o mmr3_before=%06o]\n",
+                                   (unsigned)++esp_init_reset_trace_count,
+                                   (unsigned)inst_pc, (unsigned)IR,
+                                   (unsigned)inst_psw, (unsigned)SP,
+                                   (int)reset_status, (unsigned)MMR0,
+                                   (unsigned)MMR3);
+                        }
+                    }
+#endif
+                    (void)reset_status;
                     PIRQ = 0;                           /* clear PIRQ */
                     STKLIM = 0;                         /* clear STKLIM */
                     MMR0 = 0;                           /* clear MMR0 */
@@ -1564,13 +2057,31 @@ while (reason == 0)  {
 
     case 002:                                           /* CMP */
         if (CPUT (IS_SDSD) && srcreg && !dstreg) {      /* R,not R */
-            src2 = ReadW (GeteaW (dstspec));
+            ea = GeteaW (dstspec);
+            src2 = ReadW (ea);
             src = R[srcspec];
             }
         else {
             src = srcreg? R[srcspec]: ReadW (GeteaW (srcspec));
-            src2 = dstreg? R[dstspec]: ReadW (GeteaW (dstspec));
+            if (dstreg)
+                src2 = R[dstspec];
+            else {
+                ea = GeteaW (dstspec);
+                src2 = ReadW (ea);
+                }
             }
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+        if (inst_pc == 002044) {
+            static uint32 esp_cmp_trace_count;
+            if (esp_cmp_trace_count < 16) {
+                printf("[CPU boot-CMP #%u pc=%06o ir=%06o ea=%08o src=%06o dst=%06o psw=%06o r0=%06o]\n",
+                       (unsigned)esp_cmp_trace_count++, (unsigned)inst_pc,
+                       (unsigned)IR, (unsigned)ea, (unsigned)src,
+                       (unsigned)src2, (unsigned)get_PSW(),
+                       (unsigned)R[0]);
+            }
+        }
+#endif
         dst = (src - src2) & 0177777;
         if (hst_ent) {
             hst_ent->src = src;
@@ -1985,6 +2496,36 @@ while (reason == 0)  {
             break;
 
         case 036: case 037:                             /* BCS */
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+            if ((inst_pc == 002050) && (MMR0 & MMR0_MME) &&
+                (R[0] >= 0157770)) {
+                static uint32 esp_clear_boundary_branch_count;
+                static uint32 esp_clear_second_branch_count;
+                uint32 *trace_count = (inst_pc == 002050) ?
+                                      &esp_clear_boundary_branch_count :
+                                      &esp_clear_second_branch_count;
+                const char *loop_name = (inst_pc == 002050) ? "first" : "second";
+                if (*trace_count < 12) {
+                    printf("[CPU clear-%s-boundary BCS #%u r0=%06o C=%u Z=%u take=%u pc=%06o ir=%06o psw=%06o mmr0=%06o mmr3=%06o]\n",
+                           loop_name, (unsigned)(*trace_count)++,
+                           (unsigned)R[0], (unsigned)C, (unsigned)Z,
+                           (unsigned)(C != 0), (unsigned)inst_pc,
+                           (unsigned)IR, (unsigned)get_PSW(),
+                           (unsigned)MMR0, (unsigned)MMR3);
+                }
+            }
+            if ((inst_pc == 002064) && (MMR0 & MMR0_MME) && !C) {
+                static uint32 esp_clear_second_exit_branch_count;
+                if (esp_clear_second_exit_branch_count < 8) {
+                    printf("[CPU clear-second BCS exit #%u r0=%06o C=%u Z=%u pc=%06o ir=%06o psw=%06o mmr0=%06o mmr3=%06o]\n",
+                           (unsigned)esp_clear_second_exit_branch_count++,
+                           (unsigned)R[0], (unsigned)C, (unsigned)Z,
+                           (unsigned)inst_pc, (unsigned)IR,
+                           (unsigned)get_PSW(), (unsigned)MMR0,
+                           (unsigned)MMR3);
+                }
+            }
+#endif
             if (C) {
                 BRANCH_B (IR);
                 }
@@ -2625,10 +3166,12 @@ if (ADDR_IS_MEM (pa))                                   /* memory address? */
     return RdMemW (pa);
 if ((pa < IOPAGEBASE) ||                                /* not I/O address */
     (CPUT (CPUT_J) && (pa >= IOBA_CPU))) {              /* or J11 int reg? */
+        esp_trace_nxm ("ReadE", pa);
         setCPUERR (CPUE_NXM);
         ABORT (TRAP_NXM);
         }
 if (iopageR (&data, pa, READ) != SCPE_OK) {             /* invalid I/O addr? */
+    esp_trace_nxm ("ReadE-iopage", pa);
     setCPUERR (CPUE_TMO);
     ABORT (TRAP_NXM);
     }
@@ -2713,10 +3256,12 @@ int32 data;
 if (ADDR_IS_MEM (pa))                                   /* memory address? */
     return RdMemW (pa);
 if (pa < IOPAGEBASE) {                                  /* not I/O address? */
+    esp_trace_nxm ("PReadW", pa);
     setCPUERR (CPUE_NXM);
     ABORT (TRAP_NXM);
     }
 if (iopageR (&data, pa, READ) != SCPE_OK) {             /* invalid I/O addr? */
+    esp_trace_nxm ("PReadW-iopage", pa);
     setCPUERR (CPUE_TMO);
     ABORT (TRAP_NXM);
     }
@@ -2730,10 +3275,12 @@ int32 data;
 if (ADDR_IS_MEM (pa))                                   /* memory address? */
     return RdMemB (pa);
 if (pa < IOPAGEBASE) {                                  /* not I/O address? */
+    esp_trace_nxm ("PReadB", pa);
     setCPUERR (CPUE_NXM);
     ABORT (TRAP_NXM);
     }
 if (iopageR (&data, pa, READ) != SCPE_OK) {             /* invalid I/O addr? */
+    esp_trace_nxm ("PReadB-iopage", pa);
     setCPUERR (CPUE_TMO);
     ABORT (TRAP_NXM);
     }
@@ -2803,10 +3350,12 @@ if (ADDR_IS_MEM (pa)) {                                 /* memory address? */
     return;
     }
 if (pa < IOPAGEBASE) {                                  /* not I/O address? */
+    esp_trace_nxm ("PWriteW", pa);
     setCPUERR (CPUE_NXM);
     ABORT (TRAP_NXM);
     }
 if (iopageW (data, pa, WRITE) != SCPE_OK) {             /* invalid I/O addr? */
+    esp_trace_nxm ("PWriteW-iopage", pa);
     setCPUERR (CPUE_TMO);
     ABORT (TRAP_NXM);
     }
@@ -2820,10 +3369,12 @@ if (ADDR_IS_MEM (pa)) {                                 /* memory address? */
     return;
     }             
 if (pa < IOPAGEBASE) {                                  /* not I/O address? */
+    esp_trace_nxm ("PWriteB", pa);
     setCPUERR (CPUE_NXM);
     ABORT (TRAP_NXM);
     }
 if (iopageW (data, pa, WRITEB) != SCPE_OK) {            /* invalid I/O addr? */
+    esp_trace_nxm ("PWriteB-iopage", pa);
     setCPUERR (CPUE_TMO);
     ABORT (TRAP_NXM);
     }
@@ -2863,6 +3414,23 @@ if (MMR0 & MMR0_MME) {                                  /* if mmgt */
         if (pa >= 0760000)
             pa = 017000000 | pa;
         }
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+    if ((inst_pc == 002042 || inst_pc == 002044) &&
+        ((((va & 0177777) >= 0157600) &&
+          ((((va & 0177777) & 077) == 0) ||
+           ((va & 0177777) >= 0157774))) || !ADDR_IS_MEM (pa))) {
+        static uint32 esp_clear_xlate_read_trace_count;
+        if (esp_clear_xlate_read_trace_count < 32) {
+            printf("[CPU clear-xlate R #%u pc=%06o va=%06o pa=%08o apr=%02o pdr=%06o par=%06o mmr0=%06o mmr3=%06o psw=%06o]\n",
+                   (unsigned)esp_clear_xlate_read_trace_count++, (unsigned)inst_pc,
+                   (unsigned)(va & 0177777), (unsigned)pa,
+                   (unsigned)apridx, (unsigned)(apr & 0177777),
+                   (unsigned)((apr >> 16) & 0177777),
+                   (unsigned)MMR0, (unsigned)MMR3,
+                   (unsigned)get_PSW());
+        }
+    }
+#endif
     }
 else {
     pa = va & 0177777;                                  /* mmgt off */
@@ -2931,11 +3499,13 @@ return ((apr & PDR_ED)? (dbn < plf): (dbn > plf));      /* pg lnt error? */
 
 void reloc_abort (int32 err, int32 apridx)
 {
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+esp_trace_mmu_fault (err, apridx);
+#endif
 if (update_MM) {                                        /* MMR0 not frozen? */
     MMR0 = (MMR0 & ~MMR0_PAGE) | (apridx << MMR0_V_PAGE);
     MMR0 = MMR0 | err;                                  /* set aborts */
     }
-APRFILE[apridx] |= PDR_A;                               /* set A */
 ABORT (TRAP_MME);                                       /* abort ref */
 return;
 }
@@ -2974,6 +3544,41 @@ if (MMR0 & MMR0_MME) {                                  /* if mmgt */
         if (pa >= 0760000)
             pa = 017000000 | pa;
         }
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+    if (inst_pc == 002042 &&
+        (((va & 0177777) == 0157776) ||
+         ((va & 0177777) == 0160000) || !ADDR_IS_MEM (pa))) {
+        static uint32 esp_clear_xlate_write_trace_count;
+        int32 next_apridx = (apridx & ~07) | ((apridx + 1) & 07);
+        if (esp_clear_xlate_write_trace_count < 32) {
+            printf("[CPU clear-xlate W #%u pc=%06o va=%06o pa=%08o mem=%u apr=%02o pdr=%06o par=%06o next=%02o pdr=%06o par=%06o mmr0=%06o mmr3=%06o psw=%06o]\n",
+                   (unsigned)esp_clear_xlate_write_trace_count++, (unsigned)inst_pc,
+                   (unsigned)(va & 0177777), (unsigned)pa,
+                   ADDR_IS_MEM (pa) ? 1u : 0u,
+                   (unsigned)apridx, (unsigned)(apr & 0177777),
+                   (unsigned)((apr >> 16) & 0177777),
+                   (unsigned)next_apridx,
+                   (unsigned)(APRFILE[next_apridx] & 0177777),
+                   (unsigned)((APRFILE[next_apridx] >> 16) & 0177777),
+                   (unsigned)MMR0, (unsigned)MMR3,
+                   (unsigned)get_PSW());
+        }
+    }
+    if (inst_pc == 002056) {
+        static uint32 esp_clear_second_xlate_trace_count;
+        if ((esp_clear_second_xlate_trace_count < 16) ||
+            !ADDR_IS_MEM (pa)) {
+            printf("[CPU clear-second-xlate W #%u pc=%06o va=%06o pa=%08o apr=%02o pdr=%06o par=%06o mmr0=%06o mmr3=%06o psw=%06o]\n",
+                   (unsigned)esp_clear_second_xlate_trace_count++,
+                   (unsigned)inst_pc, (unsigned)(va & 0177777),
+                   (unsigned)pa, (unsigned)apridx,
+                   (unsigned)(apr & 0177777),
+                   (unsigned)((apr >> 16) & 0177777),
+                   (unsigned)MMR0, (unsigned)MMR3,
+                   (unsigned)get_PSW());
+        }
+    }
+#endif
     }
 else {
     pa = va & 0177777;                                  /* mmgt off */
@@ -3126,6 +3731,17 @@ switch ((pa >> 1) & 3) {                                /* decode pa<2:1> */
             data = (pa & 1)? (MMR0 & 0377) | (data << 8): (MMR0 & ~0377) | data;
         data = data & cpu_tab[cpu_model].mm0;
         MMR0 = (MMR0 & ~MMR0_WR) | (data & MMR0_WR);
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+        {
+        static uint32 esp_mmr0_trace_count;
+        if (esp_mmr0_trace_count < 32) {
+            printf("[MMR0 write #%u pc=%06o data=%06o now=%06o]\n",
+                   (unsigned)esp_mmr0_trace_count, (unsigned)saved_PC,
+                   (unsigned)data, (unsigned)MMR0);
+            esp_mmr0_trace_count++;
+            }
+        }
+#endif
         return SCPE_OK;
 
     default:                                            /* MMR1, MMR2 */
@@ -3143,9 +3759,24 @@ t_stat MMR3_wr (int32 data, int32 pa, int32 access)     /* MMR3 */
 {
 if (pa & 1)
     return SCPE_OK;
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+int32 old_mmr3 = MMR3;
+#endif
 MMR3 = data & cpu_tab[cpu_model].mm3;
 cpu_bme = (MMR3 & MMR3_BME) && (cpu_opt & OPT_UBM);
 dsenable = calc_ds (cm);
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+{
+static uint32 esp_mmr3_trace_count;
+if ((old_mmr3 != MMR3) && (esp_mmr3_trace_count < 24)) {
+    printf("[MMR3 write #%u pc=%06o old=%06o data=%06o now=%06o bme=%d ds=%d is=%d psw=%06o]\n",
+           (unsigned)esp_mmr3_trace_count++, (unsigned)saved_PC,
+           (unsigned)old_mmr3, (unsigned)data, (unsigned)MMR3,
+           (int)cpu_bme, (int)dsenable, (int)isenable,
+           (unsigned)get_PSW());
+    }
+}
+#endif
 return SCPE_OK;
 }
 
@@ -3186,6 +3817,10 @@ return SCPE_OK;
 t_stat APR_wr (int32 data, int32 pa, int32 access)
 {
 int32 left, idx, curr;
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+int32 supplied = data;
+static uint32 esp_page7_write_trace_count;
+#endif
 
 idx = (pa >> 1) & 017;                                  /* dspace'page */
 left = (pa >> 5) & 1;                                   /* PDR vs PAR */
@@ -3193,10 +3828,6 @@ if ((pa & 0100) == 0)                                   /* 1 for super, user */
     idx = idx | 020;
 if (pa & 0400)                                          /* 1 for user only */
     idx = idx | 040;
-/* Fuzzball KERTAB fix: preserve the Q22 I/O-page mapping in
-   kernel/supervisor/user D-space page 7. */
-if (!left && ((idx == 017) || (idx == 037) || (idx == 057)))
-    data = 077406;
 if (left)
     curr = (APRFILE[idx] >> 16) & cpu_tab[cpu_model].par;
 else curr = APRFILE[idx] & cpu_tab[cpu_model].pdr;
@@ -3207,6 +3838,16 @@ if (left)
         (((uint32) (data & cpu_tab[cpu_model].par)) << 16)) & ~(PDR_A|PDR_W);
 else APRFILE[idx] = ((APRFILE[idx] & ~0177777) |
     (data & cpu_tab[cpu_model].pdr)) & ~(PDR_A|PDR_W);
+#if defined(ESP_PLATFORM) && CONFIG_ESPPDP_BOOT_TRACE
+if (((idx & 07) == 07) && (esp_page7_write_trace_count < 64)) {
+    printf("[APR page7 write #%u pc=%06o idx=%02o part=%s access=%06o supplied=%06o applied=%06o old=%06o now=%06o mmr3=%06o psw=%06o]\n",
+           (unsigned)esp_page7_write_trace_count++, (unsigned)saved_PC,
+           (unsigned)idx, left ? "PAR" : "PDR", (unsigned)access,
+           (unsigned)supplied, (unsigned)data, (unsigned)curr,
+           (unsigned)(left ? (APRFILE[idx] >> 16) & 0177777 : APRFILE[idx] & 0177777),
+           (unsigned)MMR3, (unsigned)get_PSW());
+}
+#endif
 return SCPE_OK;
 }
 

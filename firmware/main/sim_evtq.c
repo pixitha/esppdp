@@ -1,5 +1,6 @@
 #include "sim_defs.h"
 #include "sim_evtq.h"
+#include "sim_hang_probe.h"
 
 UNIT *sim_clock_queue = QUEUE_LIST_END;
 int stop_cpu=0;
@@ -91,6 +92,7 @@ do {
     else
         sim_interval = noqueue_time = NOQUEUE_WAIT;
     AIO_EVENT_BEGIN(uptr);
+    sim_hang_probe_event_enter((uintptr_t)uptr->action);
     if (uptr->usecs_remaining) {
         sim_debug (SIM_DBG_EVENT, &sim_evq_dev, "Requeueing %s after %.0f usecs\n", sim_uname (uptr), uptr->usecs_remaining);
         reason = sim_timer_activate_after (uptr, uptr->usecs_remaining);
@@ -103,6 +105,7 @@ do {
             reason = SCPE_OK;
         }
     AIO_EVENT_COMPLETE(uptr, reason);
+    sim_hang_probe_event_exit();
     bare_reason = SCPE_BARE_STATUS (reason);
     if ((bare_reason != SCPE_OK)      && /* Provide context for unexpected errors */
         (bare_reason >= SCPE_BASE)    &&
