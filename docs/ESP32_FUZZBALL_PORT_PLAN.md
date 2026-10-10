@@ -155,6 +155,10 @@ Do not extend this work to the Pico/Pico 2 emulator, whose CPU, bus, and monitor
 are a separate implementation.  Do not replace SIMH's SCP command processor
 with an expanding hand-written command subset.
 
+The current source-level gap and first command-runtime stage are recorded
+in [the console audit](ESP32_SIMH_CONSOLE_AUDIT.md). The full SCP command
+runtime has not yet been restored or hardware-validated.
+
 ### Current state
 
 The ESP port's `scp.c` is explicitly a trimmed launcher: it selects and boots

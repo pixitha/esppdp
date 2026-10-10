@@ -45,6 +45,7 @@
 #include "sim_serial.h"
 #include "sim_sock.h"
 #include "sim_frontpanel.h"
+#include "scp_console.h"
 #include <signal.h>
 #include <ctype.h>
 #include <time.h>
@@ -66,65 +67,8 @@
 extern void dmv_configure_bos6_boot(void);
 extern void dli_configure_bos6_boot(void);
 extern t_stat auto_config(const char *name, int32 nctrl);
+extern const char *sim_stop_messages[];
 t_stat set_autocon(UNIT *uptr, int32 val, CONST char *cptr, void *desc);
-
-static void embedded_sim_console(DEVICE *bootdev)
-{
-	char line[64];
-	sim_host_escape_enable(FALSE);
-	printf("\n\nSIMH embedded console (limited command set)\n");
-	printf("Commands: CONTINUE, BOOT, HELP\n");
-	for (;;) {
-		size_t used = 0;
-		printf("sim> ");
-		fflush(stdout);
-		for (;;) {
-			t_stat input = sim_poll_kbd();
-			if (input < SCPE_KFLAG) {
-				vTaskDelay(pdMS_TO_TICKS(5));
-				continue;
-			}
-			int c = input & 0377;
-			if ((c == '\r') || (c == '\n')) {
-				putchar('\n');
-				line[used] = '\0';
-				break;
-			}
-			if ((c == '\b' || c == 0177) && used > 0) {
-				used--;
-				printf("\b \b");
-				fflush(stdout);
-				continue;
-			}
-			if (c >= 0x20 && c < 0x7f && used < sizeof(line) - 1) {
-				line[used++] = (char)toupper(c);
-				putchar(c);
-				fflush(stdout);
-			}
-		}
-		char *cmd = line;
-		while (isspace((unsigned char)*cmd)) cmd++;
-		if ((strcmp(cmd, "C") == 0) || (strcmp(cmd, "CONTINUE") == 0) || (*cmd == '\0'))
-			break;
-		if ((strcmp(cmd, "HELP") == 0) || (strcmp(cmd, "?") == 0)) {
-			printf("CONTINUE (C) resumes the guest; BOOT restarts the selected disk.\n");
-			continue;
-		}
-		if (strcmp(cmd, "BOOT") == 0) {
-			if (bootdev == NULL || bootdev->boot == NULL) {
-				printf("No bootable disk controller is selected.\n");
-				continue;
-			}
-			t_stat boot_status = bootdev->boot(0, bootdev);
-			if (boot_status == SCPE_OK)
-				break;
-			printf("Boot failed: %s\n", sim_error_text(boot_status));
-			continue;
-		}
-		printf("Unknown command. Type HELP for the embedded command list.\n");
-	}
-	sim_host_escape_enable(TRUE);
-}
 #endif
 
 FILE *sim_deb = NULL;                                   /* debug file */
@@ -468,14 +412,22 @@ t_stat reset_all (uint32 start) {
 		sim_switches = saved_sim_switches;
 		if (dptr->reset != NULL) {
 			reason = dptr->reset (dptr);
-			if (reason != SCPE_OK) return reason;
+			if (reason != SCPE_OK) {
+				fprintf(stderr, "Reset %s failed: %s\n", dptr->name,
+				        sim_error_text(reason));
+				return reason;
+			}
 		}
 	}
 	for (i = 0; sim_internal_device_count && (dptr = sim_internal_devices[i]); ++i) {
 		sim_switches = saved_sim_switches;
 		if (dptr->reset != NULL) {
 			reason = dptr->reset (dptr);
-			if (reason != SCPE_OK) return reason;
+			if (reason != SCPE_OK) {
+				fprintf(stderr, "Reset %s failed: %s\n", dptr->name,
+				        sim_error_text(reason));
+				return reason;
+			}
 		}
 	}
 	return SCPE_OK;
@@ -766,7 +718,7 @@ char *sim_trim_endspc (char *cptr) {
 CTAB *find_ctab (CTAB *tab, const char *gbuf) {
 	if (!tab) return NULL;
 	for (; tab->name != NULL; tab++) {
-		if (strcmp(gbuf, tab->name) == 0) return tab;
+		if (MATCH_CMD(gbuf, tab->name) == 0) return tab;
 	}
 	return NULL;
 }
@@ -1197,10 +1149,26 @@ int main (int argc, char *argv[]) {
 	while(1) { //infinite loop
 		status=sim_instr();
 #ifdef ESP_PLATFORM
+		/* Upstream SCP stops timer services while command input is active.
+		 * Restart them only after a command resumes guest execution. */
+		sim_stop_timer_services();
 		if (sim_host_escape_requested()) {
 			sim_host_escape_clear();
-			embedded_sim_console(dev);
+			scp_console_run(dev);
+		} else if (status != SCPE_OK) {
+			/* A HALT, device error, or breakpoint must return control to the
+			 * operator.  Re-entering sim_instr() immediately would hide the
+			 * stop reason and often repeat the failing operation forever. */
+			const char *reason = status == SCPE_STEP ? "Step expired" :
+			                     status == SCPE_STOP ? "Stopped" :
+			                     ((status > 0) && (status <= STOP_DTOFF) &&
+			                      sim_stop_messages[status] != NULL)
+			                   ? sim_stop_messages[status] : sim_error_text(status);
+			printf("\nSimulator stopped: %s (PC=%06o)\n", reason,
+			       sim_vm_pc_value ? (unsigned)sim_vm_pc_value() : 0);
+			scp_console_run(dev);
 		}
+		sim_start_timer_services();
 #endif
 	}
 	

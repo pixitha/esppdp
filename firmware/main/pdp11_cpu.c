@@ -4043,11 +4043,9 @@ if (M == NULL) {                    /* First time init */
     sim_clock_precalibrate_commands = pdp11_clock_precalibrate_commands;
     auto_config(NULL, 0);           /* do an initial auto configure */
     }
-//pcq_r = find_reg ("PCQ", NULL, dptr);
-//if (pcq_r)
-//    pcq_r->qptr = 0;
-else
-    return SCPE_IERR;
+/* The ESP port omits the upstream PCQ history register.  Its disabled
+   lookup must not leave the original `else return SCPE_IERR` behind:
+   that rejected every CPU reset after the initial memory allocation. */
 set_r_display (0, MD_KER);
 return build_dib_tab ();            /* build, chk dib_tab */
 }
