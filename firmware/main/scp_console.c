@@ -41,6 +41,7 @@
 
 enum { SCP_EX_DEPOSIT, SCP_EX_EXAMINE };
 enum { SCP_RUN_CONTINUE, SCP_RUN_GO, SCP_RUN_BOOT, SCP_RUN_STEP, SCP_RUN_RESET, SCP_RUN_RUN };
+enum { SCP_BRK_SET, SCP_BRK_CLEAR, SCP_BRK_SHOW };
 
 static DEVICE *console_bootdev;
 static t_bool console_resume;
@@ -62,6 +63,7 @@ static t_stat console_run_cmd(int32 flag, CONST char *cptr);
 static t_stat console_exdep_cmd(int32 flag, CONST char *cptr);
 static t_stat console_show_cmd(int32 flag, CONST char *cptr);
 static t_stat console_help_cmd(int32 flag, CONST char *cptr);
+static t_stat console_break_cmd(int32 flag, CONST char *cptr);
 
 /* Like upstream SCP, command names and arguments are dispatched via CTAB.
    Prefix matching is supplied by find_ctab() in scp.c. */
@@ -74,6 +76,8 @@ static CTAB cmd_table[] = {
     { "STEP",     console_run_cmd,   SCP_RUN_STEP },
     { "CONTINUE", console_run_cmd,   SCP_RUN_CONTINUE },
     { "BOOT",     console_run_cmd,   SCP_RUN_BOOT },
+    { "BREAK",    console_break_cmd, SCP_BRK_SET },
+    { "NOBREAK",  console_break_cmd, SCP_BRK_CLEAR },
     { "SHOW",     console_show_cmd,  0 },
     { "HELP",     console_help_cmd,  0 },
     { NULL, NULL, 0 }
@@ -107,6 +111,7 @@ static t_stat run_boot_prep(void)
         sim_clock_queue = unit->next;
         unit->next = NULL;
     }
+    sim_brk_npc(0);
     return reset_all(0);
 }
 
@@ -188,6 +193,8 @@ static t_stat console_exdep_cmd(int32 flag, CONST char *cptr)
         }
         else if (*cptr) return SCPE_2MARG;
         status = scalar_register(rptr, flag == SCP_EX_DEPOSIT, &value);
+        if (status == SCPE_OK && flag == SCP_EX_DEPOSIT && rptr == sim_PC)
+            sim_brk_npc(0);
         if (status == SCPE_OK && flag == SCP_EX_EXAMINE) {
             printf("%s: ", rptr->name);
             fprint_val(stdout, value, radix, rptr->width, PV_RZRO);
@@ -243,7 +250,9 @@ static t_stat console_run_cmd(int32 flag, CONST char *cptr)
     }
     if (flag == SCP_RUN_RESET) {
         if (*cptr) return SCPE_2MARG;
-        return reset_all(0);
+        status = reset_all(0);
+        if (status == SCPE_OK) sim_brk_npc(0);
+        return status;
     }
     if (flag == SCP_RUN_GO || flag == SCP_RUN_RUN) {
         t_bool has_address = *cptr != '\0';
@@ -262,6 +271,7 @@ static t_stat console_run_cmd(int32 flag, CONST char *cptr)
         if (has_address) {
             status = scalar_register(pc, TRUE, &address);
             if (status != SCPE_OK) return status;
+            sim_brk_npc(0);
         }
         console_resume = TRUE;
         return SCPE_OK;
@@ -322,6 +332,8 @@ static t_stat console_show_cmd(int32 flag, CONST char *cptr)
         return SCPE_OK;
     }
     cptr = get_glyph(cptr, arg, 0);
+    if (strcmp(arg, "BREAK") == 0)
+        return console_break_cmd(SCP_BRK_SHOW, cptr);
     if (*skip_space(cptr)) return SCPE_2MARG;
     dev = find_dev(arg);
     if (dev == NULL) return SCPE_NXDEV;
@@ -340,6 +352,69 @@ static t_stat console_show_cmd(int32 flag, CONST char *cptr)
     return SCPE_OK;
 }
 
+/* Preserve the upstream PDP-11 type letters while keeping the first-stage
+   parser bounded: one address and optional [proceed-count], no script action
+   or address range until the broader SCP parser is restored. */
+static t_stat console_break_cmd(int32 flag, CONST char *cptr)
+{
+    char arg[CBUFSIZE];
+    DEVICE *cpu = find_dev("CPU");
+    uint32 types = 0;
+    t_value address, count = 0;
+    t_stat status;
+    char *bracket;
+
+    if (!cpu || !sim_PC || !sim_brk_types) return SCPE_NOFNC;
+    cptr = skip_space(cptr);
+    if (*cptr == '-') {
+        ++cptr;
+        if (!isalpha((unsigned char)*cptr)) return SCPE_INVSW;
+        while (isalpha((unsigned char)*cptr)) {
+            int sw = toupper((unsigned char)*cptr++);
+            if (!strchr("EPRSWX", sw)) return SCPE_INVSW;
+            types |= SWMASK(sw);
+        }
+        if (*cptr && !isspace((unsigned char)*cptr)) return SCPE_INVSW;
+        cptr = skip_space(cptr);
+    }
+    if (flag == SCP_BRK_SET && types && (types & (types - 1)))
+        return SCPE_INVSW;
+    if (!*cptr) {
+        if (flag == SCP_BRK_SHOW) return sim_brk_showall(stdout, types);
+        status = scalar_register(sim_PC, FALSE, &address);
+        if (status != SCPE_OK) return status;
+    } else {
+        cptr = get_glyph(cptr, arg, 0);
+        if (*skip_space(cptr)) return SCPE_2MARG;
+        for (char *p = arg; *p; ++p) *p = (char)toupper((unsigned char)*p);
+        if (strcmp(arg, "ALL") == 0) {
+            if (flag == SCP_BRK_CLEAR) return sim_brk_clrall(types);
+            if (flag == SCP_BRK_SHOW) return sim_brk_showall(stdout, types);
+            return SCPE_ARG;
+        }
+        bracket = strchr(arg, '[');
+        if (bracket) {
+            size_t length = strlen(bracket);
+            if (flag != SCP_BRK_SET || length < 3 || bracket[length - 1] != ']')
+                return SCPE_ARG;
+            bracket[length - 1] = '\0';
+            status = parse_number(bracket + 1, 10, INT_MAX, &count);
+            if (status != SCPE_OK || !count) return SCPE_ARG;
+            *bracket = '\0';
+        }
+        status = parse_number(arg, cpu->aradix, width_mask[cpu->awidth], &address);
+        if (status != SCPE_OK) return status;
+    }
+    if (flag == SCP_BRK_SET) {
+        uint32 type = types ? types : sim_brk_dflt;
+        if ((type & (SWMASK('E') | SWMASK('R') | SWMASK('W'))) &&
+            address > 0177777u) return SCPE_ARG;
+        return sim_brk_set(address, (int32)types, (int32)count, NULL);
+    }
+    if (flag == SCP_BRK_CLEAR) return sim_brk_clr(address, (int32)types);
+    return sim_brk_show(stdout, address, (int32)types);
+}
+
 static t_stat console_help_cmd(int32 flag, CONST char *cptr)
 {
     char arg[CBUFSIZE];
@@ -356,9 +431,10 @@ static t_stat console_help_cmd(int32 flag, CONST char *cptr)
     }
     puts("EXAMINE [-O|-D|-V] STATE|PC|register|address");
     puts("DEPOSIT [-O|-D|-V] PC|register|address value");
-    puts("SHOW [device], GO [address], RUN [address], RESET, STEP [count]");
+    puts("SHOW [device|BREAK [address]], GO [address], RUN [address], RESET, STEP [count]");
     puts("CONTINUE, BOOT [device or unit], HELP");
-    puts("BREAK, SET, and full SCP media commands are not ported yet.");
+    puts("BREAK [-E|-P|-R|-S|-W|-X] [address[count]], NOBREAK [address|ALL]");
+    puts("Breakpoint actions, SET, and full SCP media commands are not ported yet.");
     return SCPE_OK;
 }
 

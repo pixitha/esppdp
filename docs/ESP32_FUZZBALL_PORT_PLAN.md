@@ -1,8 +1,12 @@
 # ESP32 Fuzzball port plan
 
-Status (2026-10-07): the ESP32-S3 N16R8 build runs under ESP-IDF 6.0.2,
+Status (2026-10-10): the ESP32-S3 N16R8 build runs under ESP-IDF 6.0.2,
 boots RT-11 and BOS6 from a four-bit SDMMC card, and has reached a DMILLS
-login. The latest serial run is `logs/esp32-bos6-20261007-124214.log`.
+login in an earlier run. SCP inspection, stepping, reset/boot, and scalar
+deposit have since been tested on the board. The basic breakpoint
+set/show/stop/step/clear/resume path and the PC display correction now have
+board transcripts; proceed counts and other breakpoint types remain; see
+`docs/ESP32_SIMH_CONSOLE_AUDIT.md`.
 The remaining gates are a full SIMH control console, safe writable-media
 shutdown/recovery, and demonstrated packet I/O. The S3 Ethernet backend is
 currently disabled; this is a no-peer boot result, not a network result.
@@ -161,19 +165,15 @@ runtime has not yet been restored or hardware-validated.
 
 ### Current state
 
-The ESP port's `scp.c` is explicitly a trimmed launcher: it selects and boots
-an image, then loops forever around `sim_instr()`.  It has no normal SCP command
-reader/dispatcher, so CPU register definitions and device command tables are
-present without commands such as `EXAMINE`, `SHOW`, or `SET` to reach them.
-Ctrl+E (SIMH's WRU character) was not intercepted at the host-input boundary.
-
-A temporary ESP-only monitor has been added to the current working build.  It
-uses Ctrl+E to stop guest execution and offers only `CONTINUE`, `BOOT`, and
-`HELP`.  It is a diagnostic bridge, not the target interface; it has built with
-ESP-IDF 6.0.2 but still needs a physical test.  The OLED console is disabled to
-keep terminal I/O from blocking on full-frame refreshes.  Current guest evidence
-is RT-11FB V05.05 running from the SD-backed BOS6 image; a normal Fuzzball
-startup/login and durable writable-disk lifecycle are not yet established.
+The ESP port's `scp.c` remains a trimmed launcher, but Ctrl+E now enters a
+separate CTAB/glyph-based command reader. `EXAMINE`, `DEPOSIT`, `SHOW`,
+`STEP`, `CONTINUE`, `RUN`, and `BOOT` have S3 transcripts. The new breakpoint
+table and commands have basic physical validation, but not the complete
+breakpoint behaviors. Device `SET`, media commands, scripts, and the full
+upstream parser remain absent. The OLED
+console is disabled to keep terminal I/O from blocking on full-frame
+refreshes. An earlier run reached the Fuzzball DMILLS login; a durable
+writable-disk lifecycle is not yet established.
 
 ### Target behavior
 

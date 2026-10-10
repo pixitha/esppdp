@@ -928,6 +928,10 @@ int main (int argc, char *argv[]) {
 		fprintf (stderr, "Unable to allocate examine buffer\n");
 		return EXIT_FAILURE;
 	};
+	if ((status = sim_brk_init()) != SCPE_OK) {
+		fprintf(stderr, "Unable to initialize breakpoints: %s\n", sim_error_text(status));
+		return EXIT_FAILURE;
+	}
 
 	/* The pre-SIMH menu binds a disk path to its controller/CPU profile. */
 #ifdef ESP_PLATFORM

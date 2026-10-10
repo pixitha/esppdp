@@ -1091,7 +1091,7 @@ DEVICE cpu_dev = {
 
 t_value pdp11_pc_value (void)
 {
-return (t_value)PC;
+return (t_value)(PC & 0177777);
 }
 
 t_stat IRAM_ATTR sim_instr (void)

@@ -1,10 +1,11 @@
 # ESP32-S3 SIMH control-console source audit
 
 Status (2026-10-10): the first SCP command-runtime stage was flashed and
-tested on the ESP32-S3. The second-reset fix has now been verified by a
-successful `BOOT RQ0`; `SHOW RQ`, `EXAMINE PC`, `STEP`, and `CONTINUE` also
-worked on hardware. `RUN` has not been retested. This is not yet the full
-upstream SIMH control program.
+tested on the ESP32-S3. `RUN`, `BOOT`, register examine/deposit, `STEP`, and
+`CONTINUE` now have hardware transcripts. A second stage restores the CPU
+breakpoint table and `BREAK`/`NOBREAK`/`SHOW BREAK`; the basic stop, step,
+clear, and resume path has also been tested on the board. This is not yet
+the full upstream SIMH control program.
 
 ## Source and behavior boundary
 
@@ -22,11 +23,13 @@ upstream SIMH control program.
   enter `scp_console_run()` in `scp_console.c`. That command reader uses
   SIMH's `get_glyph_cmd()` and `CTAB` dispatch rather than the removed
   three-command string-comparison monitor.
-- `firmware/main/scp.h` still declares many upstream APIs but defines
-  `sim_brk_test`, `sim_brk_match_type`, and related breakpoint interfaces
-  as no-ops. The first-stage `STEP` uses the same scheduled-unit stop
-  mechanism as upstream SCP; `BREAK` is deliberately not registered until
-  its real breakpoint table and CPU hooks can be restored.
+- `firmware/main/scp_break.c` now provides the address/type table, proceed
+  counts, same-instruction hit suppression, and type summary used by the
+  existing PDP-11 execute/read/write hooks. `BREAK` defaults to virtual-PC
+  type E, and `-E`, `-P`, `-R`, `-S`, `-W`, and `-X` match the CPU's advertised
+  types. SCP action scripts, ranges, and dynamic step-over breakpoints are
+  still unsupported. The first-stage `STEP` uses the same scheduled-unit
+  stop mechanism as upstream SCP.
 - The S3 input adapter in `sim_term.c` already receives from UART0 and native
   USB Serial/JTAG. Output is flushed per guest character. The prompt must
   consume those same queues while guest input is suspended; it must not
@@ -44,14 +47,15 @@ one FreeRTOS tick while waiting for input. Blank lines stay at `sim>`;
 `CONTINUE` is explicit, matching normal SCP behavior. The command table
 currently provides `EXAMINE`/`DEPOSIT` for scalar CPU registers and one
 CPU memory word, `GO`, `RUN`, `RESET`, `STEP`, `CONTINUE`, `BOOT`, basic
-`SHOW`, and `HELP`. Upstream-style abbreviated command names work.
+`SHOW`, `BREAK`, `NOBREAK`, and `HELP`. Upstream-style abbreviated command
+names work.
 SCP pauses timer services while at the prompt; `RUN` and `BOOT` clear the
 old event schedule and reset devices before restarting, as upstream does.
 
 This is deliberately narrower than full SCP: no address ranges, register
 arrays, symbolic disassembly, device modifiers, attach/detach, command
-scripts, logging commands, or breakpoints. `SHOW` reports device/unit state
-but not all upstream device-specific details. Octal is the PDP-11 default;
+scripts, logging commands, or breakpoint actions. `SHOW` reports device/unit
+state but not all upstream device-specific details. Octal is the PDP-11 default;
 `-D`, `-O`, and CPU memory `-V` are recognized by examine/deposit.
 
 The first on-board transcript is
@@ -76,11 +80,30 @@ stability. The user's Ctrl+C during the second `PGWAIT` run interrupted
 the guest startup sequence, so that sequence cannot establish BOS6 boot
 health.
 
-For the first hardware check, use a disposable or backed-up SD image, press
-Ctrl+E in the guest, then try `SHOW RQ`, `EXAMINE PC`, `EXAMINE R0`,
-`EXAMINE 1000`, `STEP`, `EXAMINE PC`, and `CONTINUE`. `DEPOSIT`, `RESET`,
-`RUN`, and `BOOT` alter guest state; test those only after recording a clean
-boot result.
+The later `logs/esp32-bos6-20261010-173502.log` verifies `RUN` no longer
+returns error 101 and `BOOT RQ0` recovers from the resulting HALT. In
+`logs/esp32-bos6-20261010-174559.log`, the guest reported `WAIT: 0`; `STEP 1`
+and `STEP 5` expired, `CONTINUE` resumed, and a scalar `DEPOSIT R0` was read
+back and restored. These logs predate the breakpoint stage. The host-only
+`firmware/tests/test_scp_break.c` checks set/clear, type summaries, proceed
+counts, and same-instruction suppression, including under sanitizers.
+
+The S3 transcript `logs/esp32-bos6-20261010-175917.log` verifies the basic
+breakpoint path: at `WAIT: 0`, `EX PC` returned `150226`; `BREAK` followed by
+`SHOW BREAK` listed `150226: -E`; `CONTINUE` stopped for `Breakpoint` at the
+same PC. `NOBREAK ALL` emptied the table, and the next `CONTINUE` resumed
+guest instructions and terminal output. No panic or disk I/O error appears
+in this run. The stop message printed `37777750226` because the signed CPU
+register was cast to a wide `t_value` without a 16-bit mask.
+
+After masking that PC value, `logs/esp32-bos6-20261010-180552.log` shows
+the stop address correctly as `150066`. With that breakpoint still set,
+`STEP 1` expired at `150072`, and `CONTINUE` ran guest instructions until
+the user returned to SCP. The mistyped `nobreak al` was rejected; the
+subsequent `NOBREAK ALL` succeeded, and `SHOW BREAK` reported no breakpoints.
+No panic or disk I/O error appears. This verifies the basic step-past-hit
+path, but not breakpoint proceed counts, other breakpoint types, repeated
+hits at a loop address, or a complete BOS6 login.
 
 ## Restoration sequence
 
@@ -89,8 +112,10 @@ boot result.
    the pinned Mac source unchanged.
 2. Bring over upstream register-array/range, symbol, switch, and device
    modifier parsing instead of expanding the first-stage scalar handlers.
-3. Restore the full breakpoint table and CPU hooks; then enable `BREAK`,
-   `NOBREAK`, `NEXT`, and their `SHOW` counterparts.
+3. Extend the S3 breakpoint check on a disposable image to cover proceed
+   counts, other types, and repeated hits at a known-safe loop address.
+   `NEXT` remains deferred until the dynamic step-over and parser machinery
+   exist.
 4. Bring over upstream media and script commands with SD-specific safety
    checks, then compare UART0 and native USB serial separately. A control
    prompt is not a guest shutdown or guaranteed disk flush.

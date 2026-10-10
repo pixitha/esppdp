@@ -62,6 +62,20 @@ extern t_bool (*sim_vm_is_subroutine_call) (t_addr **ret_addrs);
 extern uint32 sim_brk_dflt;
 extern uint32 sim_brk_types;
 extern BRKTYPTAB *sim_brk_type_desc;
+extern uint32 sim_brk_summ;
+extern uint32 sim_brk_match_type;
+extern t_addr sim_brk_match_addr;
+BRKTAB *sim_brk_fnd (t_addr loc);
+t_stat sim_brk_init (void);
+t_stat sim_brk_set (t_addr loc, int32 sw, int32 ncnt, CONST char *act);
+t_stat sim_brk_clr (t_addr loc, int32 sw);
+t_stat sim_brk_clrall (int32 sw);
+t_stat sim_brk_show (FILE *st, t_addr loc, int32 sw);
+t_stat sim_brk_showall (FILE *st, int32 sw);
+uint32 sim_brk_test (t_addr bloc, uint32 btyp);
+void sim_brk_clrspc (uint32 spc, uint32 btyp);
+void sim_brk_npc (uint32 cnt);
+const char *sim_brk_message(void);
 extern const char **sim_clock_precalibrate_commands;
 extern t_value *sim_eval;
 extern int32 sim_switches;
@@ -69,10 +83,6 @@ extern int32 sim_switch_number;
 extern char sim_name[];
 
 
-#define sim_brk_test(a, b) 0
-#define sim_brk_match_type 0
-#define sim_brk_message() ""
-#define  sim_brk_summ 0
 #define sim_asynch_enabled FALSE
 #define sim_vm_interval_units "instructions"
 
@@ -362,13 +372,8 @@ C1TAB *find_c1tab (C1TAB *tab, const char *gbuf);
 SHTAB *find_shtab (SHTAB *tab, const char *gbuf);
 t_stat get_aval (t_addr addr, DEVICE *dptr, UNIT *uptr);
 t_value get_rval (const REG *rptr, uint32 idx);
-BRKTAB *sim_brk_fnd (t_addr loc);
-uint32 sim_brk_test (t_addr bloc, uint32 btyp);
-void sim_brk_clrspc (uint32 spc, uint32 btyp);
-void sim_brk_npc (uint32 cnt);
 void sim_brk_setact (const char *action);
 char *sim_brk_replace_act (char *new_action);
-const char *sim_brk_message(void);
 t_stat sim_send_input (SEND *snd, uint8 *data, size_t size, uint32 after, uint32 delay);
 t_stat sim_show_send_input (FILE *st, const SEND *snd);
 t_bool sim_send_poll_data (SEND *snd, t_stat *stat);
