@@ -114,6 +114,11 @@ t_stat reset_all (uint32 start);
 t_stat reset_all_p (uint32 start);
 t_stat get_aval (t_addr addr, DEVICE *dptr, UNIT *uptr);
 t_value get_uint (const char *cptr, uint32 radix, t_value max, t_stat *status);
+CONST char *get_range (DEVICE *dptr, CONST char *cptr, t_addr *lo, t_addr *hi,
+                       uint32 radix, t_addr max, char term);
+t_value get_rval (const REG *rptr, uint32 idx);
+void put_rval (const REG *rptr, uint32 idx, t_value val);
+t_value strtotv (CONST char *cptr, CONST char **endptr, uint32 radix);
 DEVICE *find_dev_from_unit (UNIT *uptr);
 DEVICE *find_dev (const char *cptr);
 extern DEVICE *sim_devices[];

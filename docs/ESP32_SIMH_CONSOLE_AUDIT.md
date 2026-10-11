@@ -45,16 +45,18 @@ After `sim_instr()` returns, a non-Ctrl+E stop reports its reason and
 enters the command prompt instead of silently restarting. The reader yields
 one FreeRTOS tick while waiting for input. Blank lines stay at `sim>`;
 `CONTINUE` is explicit, matching normal SCP behavior. The command table
-currently provides `EXAMINE`/`DEPOSIT` for scalar CPU registers and one
-CPU memory word, `GO`, `RUN`, `RESET`, `STEP`, `CONTINUE`, `BOOT`, basic
+currently provides `EXAMINE`/`DEPOSIT` for scalar CPU registers, bounded
+plain-array indices, and bounded CPU memory ranges, plus `GO`, `RUN`,
+`RESET`, `STEP`, `CONTINUE`, `BOOT`, basic
 `SHOW`, `BREAK`, `NOBREAK`, and `HELP`. Upstream-style abbreviated command
 names work.
 SCP pauses timer services while at the prompt; `RUN` and `BOOT` clear the
 old event schedule and reset devices before restarting, as upstream does.
 
-This is deliberately narrower than full SCP: no address ranges, register
-arrays, symbolic disassembly, device modifiers, attach/detach, command
-scripts, logging commands, or breakpoint actions. `SHOW` reports device/unit
+This is deliberately narrower than full SCP: no unbounded address ranges,
+circular/structure-backed register arrays, symbolic disassembly, device
+modifiers, attach/detach, command scripts, logging commands, or breakpoint
+actions. `SHOW` reports device/unit
 state but not all upstream device-specific details. Octal is the PDP-11 default;
 `-D`, `-O`, and CPU memory `-V` are recognized by examine/deposit.
 
@@ -105,13 +107,47 @@ No panic or disk I/O error appears. This verifies the basic step-past-hit
 path, but not breakpoint proceed counts, other breakpoint types, repeated
 hits at a loop address, or a complete BOS6 login.
 
+The next parser increment is built and read-tested on the S3.
+`EXAMINE`/`DEPOSIT` now accept
+numeric memory ranges (`1000-1010`, `1000:1010`, `1000/10`) and indexed
+plain C-array registers (`IREQ[0-3]`), limited to 64 values per command.
+The `get_range`, `strtotv`, `get_rval`, and `put_rval` primitives in
+`firmware/main/scp_exdep_upstream.c` are adapted from SIMH commit
+`8bbec614838bca7d5b8a4963b2a877c6be335c17` (pre-register-layout
+rewrite, matching this fork's `REG` structure). Adaptations are explicit:
+`const REG` signatures, libc character classification because this fork
+lacks `sim_is*` helpers, numeric overflow rejection, and omission of the
+newer `REG_DEPOSIT` callback that does not exist in this layout. The ESP
+command reader remains a narrower adapter, **not** upstream `exdep_cmd`:
+it checks bounds, enforces the 64-value limit, and currently rejects
+circular, structure-backed, and unit-backed arrays. Host tests cover the
+upstream primitives, range errors, plain arrays, and PC updates.
+
+The S3 transcript `logs/esp32-bos6-20261011-104455.log` shows SDMMC
+mounting in 4-bit mode, attachment of `/sdcard/BOS6.IMG`, and an RT-11
+prompt after the operator interrupted `PGWAIT`. At `sim>`, `EX PC` returned
+`150254`; `EX 1000-1010` returned five words at even addresses; and
+`EX IREQ[0-3]` returned four array values. `CONTINUE` resumed guest
+execution and printed the RT-11 `.`; the operator then used Ctrl+E to
+return to `sim>`. No panic or guest disk I/O error appears. This is
+read-only SCP evidence, **not** a full BOS6 login or a range-deposit test.
+After this run, the range-count comparison was made overflow-safe; that
+small follow-up has host/build validation but has not separately run on
+the board.
+Do not test a memory-range `DEPOSIT` on a running Fuzzball session without
+a copied disk and a known-safe guest RAM region. This particular run used
+full `flash`, which also rewrote SPIFFS at `0x150000`; use `app-flash` for
+future code-only updates that should preserve SPIFFS writes.
+
 ## Restoration sequence
 
 1. Verify the first-stage commands on the S3 against a copied RT-11/BOS6
    disk and compare their transcript with the pinned Mac baseline. Preserve
    the pinned Mac source unchanged.
-2. Bring over upstream register-array/range, symbol, switch, and device
-   modifier parsing instead of expanding the first-stage scalar handlers.
+2. Extend upstream examine/deposit loops and device targeting, with host
+   tests for ESP adapter bounds and read-only behavior; then bring over the
+   remaining upstream symbol, switch, circular-array, and device-modifier
+   parsing instead of expanding the first-stage handlers indefinitely.
 3. Extend the S3 breakpoint check on a disposable image to cover proceed
    counts, other types, and repeated hits at a known-safe loop address.
    `NEXT` remains deferred until the dynamic step-over and parser machinery

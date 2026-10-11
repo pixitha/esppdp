@@ -7,6 +7,10 @@ deposit have since been tested on the board. The basic breakpoint
 set/show/stop/step/clear/resume path and the PC display correction now have
 board transcripts; proceed counts and other breakpoint types remain; see
 `docs/ESP32_SIMH_CONSOLE_AUDIT.md`.
+A bounded numeric range/index parser using matching historical SIMH
+primitives has now passed read-only S3 console tests; the surrounding
+command adapter is still a restricted ESP implementation. See the
+October 11 transcript in `docs/ESP32_SIMH_CONSOLE_AUDIT.md`.
 The remaining gates are a full SIMH control console, safe writable-media
 shutdown/recovery, and demonstrated packet I/O. The S3 Ethernet backend is
 currently disabled; this is a no-peer boot result, not a network result.
@@ -170,7 +174,9 @@ separate CTAB/glyph-based command reader. `EXAMINE`, `DEPOSIT`, `SHOW`,
 `STEP`, `CONTINUE`, `RUN`, and `BOOT` have S3 transcripts. The new breakpoint
 table and commands have basic physical validation, but not the complete
 breakpoint behaviors. Device `SET`, media commands, scripts, and the full
-upstream parser remain absent. The OLED
+upstream parser remain absent. Numeric memory ranges and plain register
+arrays have read-only S3 evidence, but range deposits have not been tested
+on the board. The OLED
 console is disabled to keep terminal I/O from blocking on full-frame
 refreshes. An earlier run reached the Fuzzball DMILLS login; a durable
 writable-disk lifecycle is not yet established.
