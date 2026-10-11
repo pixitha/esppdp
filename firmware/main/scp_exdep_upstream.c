@@ -23,7 +23,10 @@
 
    ESP adaptations: make last address/value visible to the separate command
    reader, retain the fork's const REG interface, use libc ctype where this
-   fork lacks sim_is* helpers, and reject numeric overflow in strtotv. The
+   fork lacks sim_is* helpers, reject numeric overflow in strtotv, and use
+   the field's actual width for REG_UNIT access (as newer upstream does).
+   The older REG_UNIT primitive assumes every field is uint32, but RQ's
+   CPKT/PKTQ are uint16 and can be unaligned on the ESP32. The
    optional VM address parser remains
    NULL until its upstream PDP-11 hook is restored. Command output limits and
    target validation remain in scp_console.c, not in these primitives. */
@@ -128,6 +131,38 @@ CONST char *get_range(DEVICE *dptr, CONST char *cptr, t_addr *lo, t_addr *hi,
 }
 
 /* Upstream register reads for this fork's REG layout. */
+static uint32 get_unit_rval(const REG *rptr, uint32 idx)
+{
+    const uint8 *loc = (const uint8 *)rptr->loc + idx * sizeof(UNIT);
+    uint32 val = 0;
+    if (rptr->obj_size == sizeof(uint8)) {
+        uint8 word;
+        memcpy(&word, loc, sizeof(word));
+        val = word;
+    } else if (rptr->obj_size == sizeof(uint16)) {
+        uint16 word;
+        memcpy(&word, loc, sizeof(word));
+        val = word;
+    } else if (rptr->obj_size == sizeof(uint32)) {
+        memcpy(&val, loc, sizeof(val));
+    }
+    return val;
+}
+
+static void put_unit_rval(const REG *rptr, uint32 idx, uint32 val)
+{
+    uint8 *loc = (uint8 *)rptr->loc + idx * sizeof(UNIT);
+    if (rptr->obj_size == sizeof(uint8)) {
+        uint8 word = (uint8)val;
+        memcpy(loc, &word, sizeof(word));
+    } else if (rptr->obj_size == sizeof(uint16)) {
+        uint16 word = (uint16)val;
+        memcpy(loc, &word, sizeof(word));
+    } else if (rptr->obj_size == sizeof(uint32)) {
+        memcpy(loc, &val, sizeof(val));
+    }
+}
+
 t_value get_rval(const REG *rptr, uint32 idx)
 {
     size_t sz = SZ_R(rptr);
@@ -138,9 +173,8 @@ t_value get_rval(const REG *rptr, uint32 idx)
         idx += rptr->qptr;
         if (idx >= rptr->depth) idx -= rptr->depth;
     }
-    if ((rptr->depth > 1) && (rptr->flags & REG_UNIT)) {
-        ptr = (uint32 *)(((UNIT *)rptr->loc) + idx);
-        val = *ptr;
+    if (rptr->flags & REG_UNIT) {
+        val = get_unit_rval(rptr, idx);
     } else if ((rptr->depth > 1) && (rptr->flags & REG_STRUCT)) {
         ptr = (uint32 *)(((size_t)rptr->loc) + (idx * rptr->str_size));
         val = *ptr;
@@ -172,10 +206,11 @@ void put_rval_pcchk(const REG *rptr, uint32 idx, t_value val, t_bool pc_chk)
         idx += rptr->qptr;
         if (idx >= rptr->depth) idx -= rptr->depth;
     }
-    if ((rptr->depth > 1) && (rptr->flags & REG_UNIT)) {
-        ptr = (uint32 *)(((UNIT *)rptr->loc) + idx);
-        *ptr = (*ptr & ~(((uint32)mask) << rptr->offset)) |
-               (((uint32)val) << rptr->offset);
+    if (rptr->flags & REG_UNIT) {
+        uint32 current = get_unit_rval(rptr, idx);
+        current = (current & ~(((uint32)mask) << rptr->offset)) |
+                  (((uint32)val) << rptr->offset);
+        put_unit_rval(rptr, idx, current);
     } else if ((rptr->depth > 1) && (rptr->flags & REG_STRUCT)) {
         ptr = (uint32 *)(((size_t)rptr->loc) + (idx * rptr->str_size));
         *ptr = (*ptr & ~(((uint32)mask) << rptr->offset)) |

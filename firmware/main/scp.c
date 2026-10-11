@@ -278,24 +278,24 @@ void fprint_fields (FILE *stream, t_value before, t_value after, BITFIELD* bitde
 
 t_value get_uint (const char *cptr, uint32 radix, t_value max, t_stat *status) {
 	t_value val;
-	char *tptr;
+	CONST char *tptr;
+	t_value scale = 1;
 	
 	*status = SCPE_OK;
-	val = strtol ((CONST char *)cptr, &tptr, radix);
+	val = strtotv ((CONST char *)cptr, &tptr, radix);
 	if ((cptr == tptr) || (val > max)) {
 		*status = SCPE_ARG;
 	} else {
-		while (isspace (*tptr)) tptr++;
-		if (toupper (*tptr) == 'K') {
-			val *= 1000;
+		while (isspace ((unsigned char)*tptr)) tptr++;
+		if (toupper ((unsigned char)*tptr) == 'K') {
+			scale = 1000;
 			++tptr;
-		} else {
-			if (toupper (*tptr) == 'M') {
-				val *= 1000000;
-				++tptr;
-			}
+		} else if (toupper ((unsigned char)*tptr) == 'M') {
+			scale = 1000000;
+			++tptr;
 		}
-		if ((*tptr != 0) || (val > max)) *status = SCPE_ARG;
+		if ((*tptr != 0) || (val > max / scale)) *status = SCPE_ARG;
+		else val *= scale;
 	}
 	return val;
 }
@@ -321,23 +321,22 @@ void sim_debug_bits(uint32 dbits, DEVICE* dptr, BITFIELD* bitdefs,
 }
 
 DEVICE *find_dev (const char *cptr) {
+	if (cptr == NULL) return NULL;
 	for (int i = 0; (sim_devices[i] != NULL); i++) {
-		if (strcmp(sim_devices[i]->name, cptr)==0) {
+		if (strcmp(sim_devices[i]->name, cptr)==0 ||
+		    (sim_devices[i]->lname && strcmp(sim_devices[i]->lname, cptr)==0)) {
 			return sim_devices[i];
 		}
 	}
 	for (int i = 0; i<sim_internal_device_count && sim_internal_devices[i]; i++) {
-		if (strcmp(sim_internal_devices[i]->name, cptr)==0) {
-			return sim_devices[i];
+		if (strcmp(sim_internal_devices[i]->name, cptr)==0 ||
+		    (sim_internal_devices[i]->lname &&
+		     strcmp(sim_internal_devices[i]->lname, cptr)==0)) {
+			return sim_internal_devices[i];
 		}
 	}
 
 //	printf("find_dev %s failed\n", cptr);
-	return NULL;
-}
-
-DEVICE *find_unit (const char *cptr, UNIT **uptr) {
-	printf("find_unit: %s STUB\n", cptr);
 	return NULL;
 }
 

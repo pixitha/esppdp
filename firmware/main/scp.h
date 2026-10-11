@@ -98,6 +98,8 @@ t_stat sim_messagef (t_stat stat, const char *fmt, ...) GCC_FMT_ATTR(2, 3);
 #define sim_debug(dbits, dptr, ...) do { if (sim_deb && dptr && ((dptr)->dctrl & (dbits))) _sim_debug_device (dbits, dptr, __VA_ARGS__);} while (0)
 #define sim_debug_unit(dbits, uptr, ...) do { if (sim_deb && uptr && (((uptr)->dctrl | (uptr)->dptr->dctrl) & (dbits))) _sim_debug_unit (dbits, uptr, __VA_ARGS__);} while (0)
 extern t_stat fprint_sym (FILE *ofile, t_addr addr, t_value *val, UNIT *uptr, int32 sw);
+extern t_stat parse_sym (CONST char *cptr, t_addr addr, UNIT *uptr,
+                         t_value *val, int32 sw);
 #define stdnul stderr
 extern FILE *sim_deb;
 #define get_yn(x, y) y
@@ -121,6 +123,7 @@ void put_rval (const REG *rptr, uint32 idx, t_value val);
 t_value strtotv (CONST char *cptr, CONST char **endptr, uint32 radix);
 DEVICE *find_dev_from_unit (UNIT *uptr);
 DEVICE *find_dev (const char *cptr);
+DEVICE *find_unit (const char *cptr, UNIT **uptr);
 extern DEVICE *sim_devices[];
 const char *sim_dname (DEVICE *dptr);
 const char *sim_uname (UNIT *uptr);

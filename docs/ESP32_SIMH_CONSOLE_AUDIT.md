@@ -1,6 +1,6 @@
 # ESP32-S3 SIMH control-console source audit
 
-Status (2026-10-10): the first SCP command-runtime stage was flashed and
+Status (2026-10-11): the first SCP command-runtime stage was flashed and
 tested on the ESP32-S3. `RUN`, `BOOT`, register examine/deposit, `STEP`, and
 `CONTINUE` now have hardware transcripts. A second stage restores the CPU
 breakpoint table and `BREAK`/`NOBREAK`/`SHOW BREAK`; the basic stop, step,
@@ -54,11 +54,12 @@ SCP pauses timer services while at the prompt; `RUN` and `BOOT` clear the
 old event schedule and reset devices before restarting, as upstream does.
 
 This is deliberately narrower than full SCP: no unbounded address ranges,
-circular/structure-backed register arrays, symbolic disassembly, device
-modifiers, attach/detach, command scripts, logging commands, or breakpoint
-actions. `SHOW` reports device/unit
-state but not all upstream device-specific details. Octal is the PDP-11 default;
-`-D`, `-O`, and CPU memory `-V` are recognized by examine/deposit.
+structure-backed register arrays, attach/detach, command scripts, logging
+commands, or breakpoint actions. The later parser stage added bounded
+circular/unit-backed arrays, symbolic disassembly, and device/unit modifiers.
+`SHOW` reports device/unit state but not all upstream device-specific details.
+Octal is the PDP-11 default; the later parser accepts radix, symbolic, and
+virtual-address switches for examine/deposit.
 
 The first on-board transcript is
 `logs/esp32-bos6-20261010-171352.log`. It confirms the SD card mounts,
@@ -134,6 +135,74 @@ read-only SCP evidence, **not** a full BOS6 login or a range-deposit test.
 After this run, the range-count comparison was made overflow-safe; that
 small follow-up has host/build validation but has not separately run on
 the board.
+
+The next source increment adapts the matching historical upstream
+`exdep_reg_loop`, `exdep_addr_loop`, and `find_unit` paths in
+`firmware/main/scp_exdep_adapter.c` and `scp_exdep_target.c`. The ESP command
+reader now accepts an optional device/unit before a register or address,
+including `EX RQ0 SA`, `EX CPU PC`, register ranges such as `R0-R5`, and
+unindexed plain register arrays. It still limits each range to 64 values.
+The adapter preflights every selected register before a deposit, checks
+descriptor storage bounds and read-only flags, and refuses writes to a
+read-only or disabled unit. It uses the device's own address increment and
+`get_aval`/`deposit` callbacks, but does not expose upstream interactive,
+search, symbolic, output-file, or raw-media deposit modes. `STATE` remains
+the older scalar-register summary, not upstream's full array expansion.
+Host tests in `firmware/tests/test_scp_exdep_adapter.c` and
+`test_scp_exdep_target.c` pass with address/array bounds, read-only, partial
+write prevention, and unit-resolution cases. ESP-IDF 6.0.2 builds an S3
+image. The S3 log `logs/esp32-bos6-20261011-110233.log` subsequently
+confirmed `EX CPU PC`, `EX CPU R0-R5`, `EX RQ0 SA`, and `CONTINUE` on the
+board. It did not test deposits.
+
+The following parser increment reuses the historical `get_sim_sw` grammar
+and the existing PDP-11 `fprint_sym`/`parse_sym` hooks. The bounded ESP
+option adapter accepts supported radix, symbolic, and virtual-address
+switches before or after a device/unit modifier. Symbolic address examine
+advances by the decoded instruction length; symbolic deposit can emit the
+extra instruction words, with range, buffer, read-only, and fixed-capacity
+checks before writing. The older numeric parser now uses upstream-style
+`strtotv` so full-width values do not depend on ESP32 `long` size, with a
+bounded K/M suffix multiplication. Circular and unit-backed arrays are now
+descriptor-checked; the latter also checks the destination unit's read-only
+flag.
+Structure-backed arrays remain unsupported because no active PDP-11 device
+uses one and the descriptor alone does not prove its backing allocation.
+This remains narrower than upstream: search expressions, output files,
+interactive examine/deposit, and raw attached-media deposits are absent.
+Host sanitizer tests and the ESP-IDF 6.0.2 build pass; **this parser
+increment has not yet been flashed or board-tested**. Read-only S3 probes
+should include `EX -M CPU 150100-150110`, `EX CPU PCQ[0-3]`, and
+`EX RQ0 CPKT[0-3]` after confirming those ranges in the current profile.
+`PCQ` tests circular-array addressing only: the older ESP CPU port leaves
+the upstream live `PCQ` queue-pointer update disabled, so its chronological
+ordering is not yet trustworthy.
+
+The first S3 parser run, `logs/esp32-bos6-20261011-155739.log`, confirmed
+`EX -M CPU 150100-150110` and `EX CPU PCQ[0-3]`. Both attempts at
+`EX RQ0 CPKT[0-3]` returned `SCP: Function not implemented`. The device and
+register parsed correctly; the ESP preflight incorrectly required every
+`REG_UNIT` field to be at least 32 bits, while RQ `CPKT` is the 16-bit
+`UNIT.us9` field. The matching historical upstream `get_rval`/`put_rval`
+path also dereferenced `REG_UNIT` fields as `uint32`, which would be unsafe
+for `us9` on ESP32. The follow-up uses the descriptor's actual 8/16/32-bit
+field size for unit-array access, matching the size-aware behavior of newer
+upstream SIMH, and retains read-only/bounds checks. A host sanitizer test
+checks 16-bit `CPKT`-style reads and writes without changing adjacent
+`UNIT.us10`. The S3 re-test in `logs/esp32-bos6-20261011-160201.log`
+shows two successful `EX RQ0 CPKT[0-3]` reads, all zero while the RQ
+units were idle. `logs/esp32-bos6-20261011-160826.log` then read
+`EX RQ0 CAPAC[0-3]` as `311200`, `311200`, `311200`, `800`, matching the
+three RD54 and one RX50 capacities in `pdp11_rq.c`. These are read-only
+S3 checks of both 16-bit and 32-bit unit-backed register fields, not a
+deposit or active-transfer `CPKT` check.
+
+`logs/esp32-bos6-20261011-161120.log` adds an S3 breakpoint-table check:
+`BREAK -E 150100[2]` and `BREAK -P 150100` appeared in `SHOW BREAK` as
+`-E [2]` and `-P`; `NOBREAK ALL` removed both. The guest was not resumed
+with these breakpoints installed, so this confirms count/type parsing,
+display, and clearing, not a two-hit stop or physical execute trigger.
+
 Do not test a memory-range `DEPOSIT` on a running Fuzzball session without
 a copied disk and a known-safe guest RAM region. This particular run used
 full `flash`, which also rewrote SPIFFS at `0x150000`; use `app-flash` for
@@ -144,10 +213,10 @@ future code-only updates that should preserve SPIFFS writes.
 1. Verify the first-stage commands on the S3 against a copied RT-11/BOS6
    disk and compare their transcript with the pinned Mac baseline. Preserve
    the pinned Mac source unchanged.
-2. Extend upstream examine/deposit loops and device targeting, with host
-   tests for ESP adapter bounds and read-only behavior; then bring over the
-   remaining upstream symbol, switch, circular-array, and device-modifier
-   parsing instead of expanding the first-stage handlers indefinitely.
+2. The symbolic/switch/circular/unit-array parser has read-only S3 probes:
+   disassembly, `PCQ`, `CPKT`, and `CAPAC`. Deposits and active-transfer
+   `CPKT` have not been tested. Keep search expressions, output files, and
+   interactive modes separate until their upstream dependencies are ported.
 3. Extend the S3 breakpoint check on a disposable image to cover proceed
    counts, other types, and repeated hits at a known-safe loop address.
    `NEXT` remains deferred until the dynamic step-over and parser machinery

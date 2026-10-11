@@ -176,9 +176,17 @@ table and commands have basic physical validation, but not the complete
 breakpoint behaviors. Device `SET`, media commands, scripts, and the full
 upstream parser remain absent. Numeric memory ranges and plain register
 arrays have read-only S3 evidence, but range deposits have not been tested
-on the board. The OLED
-console is disabled to keep terminal I/O from blocking on full-frame
-refreshes. An earlier run reached the Fuzzball DMILLS login; a durable
+on the board. A subsequent upstream-derived device/unit targeting and
+examine/deposit loop increment has passed host safety tests and the ESP-IDF
+6.0.2 build; its read-only device and register probes subsequently passed
+on the S3. The symbolic/switch/circular-array increment has read-only S3
+evidence for disassembly and `PCQ`; the 16-bit `RQ0 CPKT` access gap was
+fixed and re-tested on the S3. `RQ0 CAPAC` also returned the expected
+nonzero RD54/RX50 unit capacities. The breakpoint count/type parser and
+table-clear path have an S3 transcript, but two-hit triggering remains
+untested. Deposits remain untested on the board.
+The OLED console is disabled to keep terminal I/O from blocking on
+full-frame refreshes. An earlier run reached the Fuzzball DMILLS login; a durable
 writable-disk lifecycle is not yet established.
 
 ### Target behavior

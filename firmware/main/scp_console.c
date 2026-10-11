@@ -32,6 +32,7 @@
 #endif
 #include "sim_term.h"
 #include "scp_console.h"
+#include "scp_exdep_adapter.h"
 #include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
@@ -42,7 +43,6 @@
 enum { SCP_EX_DEPOSIT, SCP_EX_EXAMINE };
 enum { SCP_RUN_CONTINUE, SCP_RUN_GO, SCP_RUN_BOOT, SCP_RUN_STEP, SCP_RUN_RESET, SCP_RUN_RUN };
 enum { SCP_BRK_SET, SCP_BRK_CLEAR, SCP_BRK_SHOW };
-enum { SCP_CONSOLE_MAX_RANGE_WORDS = 64 };
 
 static DEVICE *console_bootdev;
 static t_bool console_resume;
@@ -101,43 +101,6 @@ static t_stat parse_number(CONST char *text, uint32 radix, t_value max,
     return status;
 }
 
-/* Keep the upstream parser and register accessors intact. These checks are
-   ESP command-policy and descriptor bounds checks, not alternate SCP logic. */
-static t_stat console_range(DEVICE *dev, CONST char *text, uint32 radix,
-                            t_addr max, char terminator, t_addr *low,
-                            t_addr *high)
-{
-    t_addr previous = sim_last_addr;
-    CONST char *end = get_range(dev, text, low, high, radix, max, terminator);
-    if (!end || *end || *low > *high || *high > max) {
-        sim_last_addr = previous;
-        return SCPE_ARG;
-    }
-    return SCPE_OK;
-}
-
-static t_stat console_register(const REG *reg, uint32 index, t_bool deposit,
-                               t_value *value)
-{
-    size_t access;
-    if (!reg || !reg->loc || !reg->depth || index >= reg->depth ||
-        !reg->width || reg->width > 32 || reg->offset >= 32 ||
-        reg->width > 32 - reg->offset ||
-        (reg->flags & (REG_CIRC | REG_UNIT | REG_STRUCT)))
-        return SCPE_NOFNC;
-    access = (reg->depth > 1 || (reg->flags & REG_FIT)) &&
-             reg->width + reg->offset <= 8 ? 1 :
-             (reg->depth > 1 || (reg->flags & REG_FIT)) &&
-             reg->width + reg->offset <= 16 ? 2 : 4;
-    if (reg->obj_size / access < reg->depth) return SCPE_NOFNC;
-    if (deposit) {
-        if (reg->flags & REG_RO) return SCPE_RO;
-        if ((reg->flags & REG_NZ) && !*value) return SCPE_ARG;
-        put_rval(reg, index, *value);
-    } else *value = get_rval(reg, index);
-    return SCPE_OK;
-}
-
 /* Upstream sim_run_boot_prep() discards the old event schedule before a
    fresh RUN or BOOT.  RESET alone deliberately leaves the queue intact. */
 static t_stat run_boot_prep(void)
@@ -157,61 +120,55 @@ static t_stat run_boot_prep(void)
 
 static t_stat console_exdep_cmd(int32 flag, CONST char *cptr)
 {
-    DEVICE *cpu = find_dev("CPU");
+    DEVICE *dev = find_dev("CPU");
+    UNIT *unit;
     char target[CBUFSIZE], valtext[CBUFSIZE];
-    CONST char *end;
-    const REG *rptr;
-    t_value value;
+    CONST char *end, *last_end;
+    const REG *rptr, *last;
+    t_value value = 0;
     t_addr low, high;
     t_stat status;
-    uint32 radix;
+    uint32 radix, low_index = 0, high_index = UINT32_MAX;
+    t_bool deposit = flag == SCP_EX_DEPOSIT;
 
-    if (cpu == NULL || cpu->units == NULL) return SCPE_NXDEV;
+    if (dev == NULL || dev->units == NULL) return SCPE_NXDEV;
+    unit = dev->units;
     cptr = skip_space(cptr);
-    sim_switches = 0;
-    if (*cptr == '-') {
-        ++cptr;
-        while (isalpha((unsigned char)*cptr)) {
-            int sw = toupper((unsigned char)*cptr++);
-            if (sw != 'O' && sw != 'D' && sw != 'V') return SCPE_INVSW;
-            sim_switches |= SWMASK(sw);
-        }
-        cptr = skip_space(cptr);
-    }
-    if ((sim_switches & SWMASK('O')) && (sim_switches & SWMASK('D')))
-        return SCPE_INVSW;
+    status = scp_exdep_options(&cptr, &dev, &unit);
+    if (status != SCPE_OK) return status;
     if (!*cptr) return SCPE_2FARG;
     cptr = get_glyph(cptr, target, 0);
     cptr = skip_space(cptr);
-    for (char *p = target; *p; ++p) *p = (char)toupper((unsigned char)*p);
     if (flag == SCP_EX_EXAMINE && strcmp(target, "STATE") == 0) {
         if (*cptr) return SCPE_2MARG;
-        for (rptr = cpu->registers; rptr && rptr->name; ++rptr) {
+        for (rptr = dev->registers; rptr && rptr->name; ++rptr) {
             if (rptr->flags & REG_HIDDEN) continue;
             if (rptr->depth != 1 ||
-                console_register(rptr, 0, FALSE, &value) != SCPE_OK) continue;
-            radix = (sim_switches & SWMASK('D')) ? 10 :
-                    (sim_switches & SWMASK('O')) ? 8 : rptr->radix;
+                scp_exdep_register(rptr, 0, FALSE, &value) != SCPE_OK) continue;
+            radix = scp_exdep_radix(rptr->radix);
             printf("%s: ", rptr->name);
             fprint_val(stdout, value, radix, rptr->width, PV_RZRO);
             putchar('\n');
         }
         return SCPE_OK;
     }
-    rptr = find_reg(target, &end, cpu);
-    if (rptr && (*end == '\0' || *end == '[')) {
-        low = high = 0;
+    rptr = find_reg(target, &end, dev);
+    if (rptr && (*end == '\0' || *end == '[' || *end == '-' || *end == ':')) {
+        last = rptr;
         if (*end == '[') {
             if (rptr->depth <= 1) return SCPE_ARG;
-            status = console_range(NULL, end + 1, 10, rptr->depth - 1,
-                                   ']', &low, &high);
+            status = scp_exdep_range(NULL, end + 1, 10, rptr->depth - 1,
+                                     ']', &low, &high);
             if (status != SCPE_OK) return status;
+            low_index = (uint32)low;
+            high_index = (uint32)high;
+        } else if (*end == '-' || *end == ':') {
+            last = find_reg(end + 1, &last_end, dev);
+            if (!last || *last_end || last < rptr) return SCPE_ARG;
         }
-        if (high - low >= SCP_CONSOLE_MAX_RANGE_WORDS) return SCPE_ARG;
         if (rptr->width == 0 || rptr->width > 32) return SCPE_NOFNC;
-        radix = (sim_switches & SWMASK('D')) ? 10 :
-                (sim_switches & SWMASK('O')) ? 8 : rptr->radix;
-        if (flag == SCP_EX_DEPOSIT) {
+        radix = scp_exdep_radix(rptr->radix);
+        if (deposit) {
             if (!*cptr) return SCPE_2FARG;
             cptr = get_glyph(cptr, valtext, 0);
             if (*skip_space(cptr)) return SCPE_2MARG;
@@ -219,61 +176,25 @@ static t_stat console_exdep_cmd(int32 flag, CONST char *cptr)
             if (status != SCPE_OK) return status;
         }
         else if (*cptr) return SCPE_2MARG;
-        for (t_addr index = low; index <= high; ++index) {
-            status = console_register(rptr, (uint32)index,
-                                      flag == SCP_EX_DEPOSIT, &value);
-            if (status != SCPE_OK) return status;
-            sim_last_val = value;
-            if (flag == SCP_EX_EXAMINE) {
-                if (rptr->depth > 1)
-                    printf("%s[%u]: ", rptr->name, (unsigned)index);
-                else printf("%s: ", rptr->name);
-                fprint_val(stdout, value, radix, rptr->width, PV_RZRO);
-                putchar('\n');
-            }
-        }
-        return SCPE_OK;
+        return scp_exdep_reg_loop(stdout, dev, rptr, last,
+                                   low_index, high_index,
+                                   deposit, value, FALSE);
     }
 
-    /* CPU addresses and data are octal by default, as in PDP-11 SCP. */
-    if (cpu->awidth == 0 || cpu->awidth > 32 ||
-        cpu->dwidth == 0 || cpu->dwidth > 32 || cpu->aincr == 0)
+    if (dev->awidth == 0 || dev->awidth > 32 ||
+        dev->dwidth == 0 || dev->dwidth > 32 || dev->aincr == 0)
         return SCPE_NOFNC;
-    radix = (sim_switches & SWMASK('D')) ? 10 :
-            (sim_switches & SWMASK('O')) ? 8 : cpu->aradix;
-    status = console_range(cpu, target, radix,
-                           (t_addr)width_mask[cpu->awidth], 0, &low, &high);
+    radix = scp_exdep_radix(dev->aradix);
+    status = scp_exdep_range(dev, target, radix,
+                             (t_addr)width_mask[dev->awidth], 0, &low, &high);
     if (status != SCPE_OK) return status;
-    if (low % cpu->aincr ||
-        (high - low) / cpu->aincr >= SCP_CONSOLE_MAX_RANGE_WORDS)
-        return SCPE_ARG;
-    if (flag == SCP_EX_DEPOSIT) {
+    if (deposit) {
         if (!*cptr) return SCPE_2FARG;
-        cptr = get_glyph(cptr, valtext, 0);
-        if (*skip_space(cptr)) return SCPE_2MARG;
-        status = parse_number(valtext, radix, width_mask[cpu->dwidth], &value);
-        if (status != SCPE_OK) return status;
-        if (!cpu->deposit) return SCPE_NOFNC;
-        for (t_addr address = low; address <= high; address += cpu->aincr) {
-            status = cpu->deposit(value, address, cpu->units, sim_switches);
-            if (status != SCPE_OK) return status;
-            sim_last_val = value;
-        }
-        return SCPE_OK;
+    } else if (*cptr) {
+        return SCPE_2MARG;
     }
-    if (*cptr) return SCPE_2MARG;
-    if (!cpu->examine) return SCPE_NOFNC;
-    for (t_addr address = low; address <= high; address += cpu->aincr) {
-        status = cpu->examine(&value, address, cpu->units, sim_switches);
-        if (status != SCPE_OK) return status;
-        sim_last_val = value;
-        printf("%06o: ", (unsigned)address);
-        fprint_val(stdout, value,
-                   (sim_switches & SWMASK('D')) ? 10 : cpu->dradix,
-                   cpu->dwidth, PV_RZRO);
-        putchar('\n');
-    }
-    return SCPE_OK;
+    return scp_exdep_addr_loop(stdout, dev, unit, low, high, deposit,
+                                deposit ? cptr : NULL);
 }
 
 static t_stat console_run_cmd(int32 flag, CONST char *cptr)
@@ -311,7 +232,7 @@ static t_stat console_run_cmd(int32 flag, CONST char *cptr)
             if (status != SCPE_OK) return status;
         }
         if (has_address) {
-            status = console_register(pc, 0, TRUE, &address);
+            status = scp_exdep_register(pc, 0, TRUE, &address);
             if (status != SCPE_OK) return status;
         }
         console_resume = TRUE;
@@ -422,7 +343,7 @@ static t_stat console_break_cmd(int32 flag, CONST char *cptr)
         return SCPE_INVSW;
     if (!*cptr) {
         if (flag == SCP_BRK_SHOW) return sim_brk_showall(stdout, types);
-        status = console_register(sim_PC, 0, FALSE, &address);
+        status = scp_exdep_register(sim_PC, 0, FALSE, &address);
         if (status != SCPE_OK) return status;
     } else {
         cptr = get_glyph(cptr, arg, 0);
@@ -470,8 +391,9 @@ static t_stat console_help_cmd(int32 flag, CONST char *cptr)
         printf("%s\n", cmd->help ? cmd->help : cmd->name);
         return SCPE_OK;
     }
-    puts("EXAMINE [-O|-D|-V] STATE|register[index-range]|address[-end|/count]");
-    puts("DEPOSIT [-O|-D|-V] register[index-range]|address[-end|/count] value");
+    puts("EXAMINE [switches] [device|unit] STATE|register[index-range]|register-register|address[-end|/count]");
+    puts("DEPOSIT [switches] [device|unit] register[index-range]|register-register|address[-end|/count] value");
+    puts("Switches: -O/-D/-H or -2..-36 radix, -A/-B/-C/-M/-R symbolic, -V virtual.");
     puts("Numeric EXAMINE/DEPOSIT ranges are limited to 64 values per command.");
     puts("SHOW [device|BREAK [address]], GO [address], RUN [address], RESET, STEP [count]");
     puts("CONTINUE, BOOT [device or unit], HELP");
@@ -529,7 +451,7 @@ static const char *console_status_text(t_stat status)
     case SCPE_2MARG: return "Too many arguments";
     case SCPE_INVSW: return "Invalid switch";
     case SCPE_NOFNC: return "Function not implemented";
-    case SCPE_RO: return "Read-only register";
+    case SCPE_RO: return "Read-only register or unit";
     case SCPE_NXDEV: return "No such device";
     case SCPE_NXUN: return "No such unit";
     case SCPE_NXM: return "Non-existent memory";
