@@ -203,6 +203,26 @@ deposit or active-transfer `CPKT` check.
 with these breakpoints installed, so this confirms count/type parsing,
 display, and clearing, not a two-hit stop or physical execute trigger.
 
+`logs/esp32-bos6-20261011-161652.log` confirms `BREAK 1000`/`RUN 1000`
+stopped at `001000`, then `DEPOSIT 1000 777` created a self-loop in guest
+RAM. After `BREAK -E 1000[2]` and `CONTINUE`, millions of instructions ran
+at `001000` without a second breakpoint stop. The cause is in the ESP
+event-queue port: `UPDATE_SIM_TIME` was defined empty, so `sim_gtime()`
+never advanced and the breakpoint table suppressed every later visit as
+the same instruction. The upstream time-accounting macro is now restored,
+with a host test exercising a two-hit loop and queued-event time. Host
+sanitizers and the ESP-IDF 6.0.2 build pass. The first commands in the
+transcript were entered at the RT-11 prompt before Ctrl+E, then repeated
+correctly at `sim>`.
+
+The S3 re-test in `logs/esp32-bos6-20261011-162138.log` used the corrected
+firmware (`e9fdf50-dirty`, built at 16:19:44). It stopped at `001000` on
+`BREAK 1000`/`RUN 1000`, then stopped there again immediately after
+`BREAK -E 1000[2]`/`CONTINUE`, confirming counted-breakpoint triggering
+on the board. No panic or disk I/O error appears in this short run. This
+does not validate physical breakpoints, prolonged operation, or a complete
+BOS6 login.
+
 Do not test a memory-range `DEPOSIT` on a running Fuzzball session without
 a copied disk and a known-safe guest RAM region. This particular run used
 full `flash`, which also rewrote SPIFFS at `0x150000`; use `app-flash` for

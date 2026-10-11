@@ -183,8 +183,11 @@ on the S3. The symbolic/switch/circular-array increment has read-only S3
 evidence for disassembly and `PCQ`; the 16-bit `RQ0 CPKT` access gap was
 fixed and re-tested on the S3. `RQ0 CAPAC` also returned the expected
 nonzero RD54/RX50 unit capacities. The breakpoint count/type parser and
-table-clear path have an S3 transcript, but two-hit triggering remains
-untested. Deposits remain untested on the board.
+table-clear path have an S3 transcript. A two-hit self-loop test exposed
+a non-advancing guest timebase in the ESP event queue; the upstream time
+accounting is restored and passes host sanitizers, an IDF 6.0.2 build,
+and the S3 two-hit loop re-test. A RAM-only deposit was used for that loop;
+range and device deposits remain untested on the board.
 The OLED console is disabled to keep terminal I/O from blocking on
 full-frame refreshes. An earlier run reached the Fuzzball DMILLS login; a durable
 writable-disk lifecycle is not yet established.

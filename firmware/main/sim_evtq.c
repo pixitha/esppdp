@@ -4,10 +4,29 @@
 
 UNIT *sim_clock_queue = QUEUE_LIST_END;
 int stop_cpu=0;
-#define UPDATE_SIM_TIME
+/* Keep guest instruction time in step with sim_interval.  Breakpoint hit
+   suppression and proceed counts use sim_gtime(), so leaving this empty
+   makes a breakpoint at a looping PC fire only once.  This is the matching
+   upstream SCP event-queue accounting, with the existing AIO lock macros. */
+#define UPDATE_SIM_TIME                                         \
+    do {                                                        \
+        int32 elapsed;                                          \
+        AIO_LOCK;                                               \
+        if (sim_clock_queue == QUEUE_LIST_END)                  \
+            elapsed = noqueue_time - sim_interval;             \
+        else                                                    \
+            elapsed = sim_clock_queue->time - sim_interval;    \
+        sim_time += elapsed;                                    \
+        sim_rtime += (uint32)elapsed;                           \
+        if (sim_clock_queue == QUEUE_LIST_END)                  \
+            noqueue_time = sim_interval;                        \
+        else                                                    \
+            sim_clock_queue->time = sim_interval;               \
+        AIO_UNLOCK;                                             \
+    } while (0)
 #define SIM_DBG_ACTIVATE 0
 #define SIM_DBG_EVENT 0
-int32_t sim_interval=1000;
+int32_t sim_interval=0;
 int32_t noqueue_time=0;
 int sim_processing_event;
 double sim_time=0, sim_rtime=0;
