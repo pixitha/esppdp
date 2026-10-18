@@ -306,7 +306,14 @@ static esp_netif_t *wifi_sta_filtered_init_netif() {
 
 void wifi_if_open() {
 	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-	ESP_ERROR_CHECK(esp_event_loop_create_default());
+	/* The SD upload portal may already have created the process-wide default
+	 * event loop before SIMH starts. Reuse it instead of aborting on a second
+	 * create attempt. */
+	esp_err_t event_result = esp_event_loop_create_default();
+	if (event_result != ESP_OK && event_result != ESP_ERR_INVALID_STATE) {
+		ESP_LOGE(TAG, "Failed to create default event loop (0x%x)", event_result);
+		return;
+	}
 	esp_err_t result = esp_wifi_init_internal(&cfg);
 	if (result != ESP_OK) {
 		ESP_LOGE(TAG,"Init internal failed");
