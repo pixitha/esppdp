@@ -2985,11 +2985,11 @@ t_stat rq_detach (UNIT *uptr)
 t_stat r;
 
 r = sim_disk_detach (uptr);                             /* detach unit */
-if (r != SCPE_OK)
+if (uptr->flags & UNIT_ATT)                              /* flush failed; still attached */
     return r;
 uptr->flags = uptr->flags & ~(UNIT_ONL | UNIT_ATP);     /* clr onl, atn pend */
 uptr->uf = 0;                                           /* clr unit flgs */
-return SCPE_OK;
+return r;
 } 
 
 /* Device reset */

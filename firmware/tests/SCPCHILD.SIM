@@ -1,0 +1,4 @@
+; Nested DO and harmless device display-radix SET test.
+SET %1 OCTAL
+SHOW %1
+RETURN

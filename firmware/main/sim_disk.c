@@ -384,15 +384,26 @@ t_stat sim_disk_attach_ex (UNIT *uptr, const char *cptr, size_t sector_size, siz
 	struct disk_context *ctx;
 	t_offset container_size, filesystem_size, current_unit_size;
 	size_t tmp_size = 1;
+	long file_size;
+	t_stat attach_status = SCPE_OPENERR;
+	if (uptr == NULL || cptr == NULL || !*cptr || strlen(cptr) >= CBUFSIZE ||
+	    sector_size == 0 || xfer_element_size == 0) return SCPE_ARG;
 	if (uptr->flags & UNIT_DIS) return SCPE_UDIS;
 	if (!(uptr->flags & UNIT_ATTABLE)) return SCPE_NOATT;
+	if (uptr->flags & UNIT_ATT) return SCPE_ALATT;
 	DEVICE *dptr;
 	if ((dptr = find_dev_from_unit (uptr)) == NULL) return SCPE_NOATT;
 
 	uptr->filename = (char *) calloc (CBUFSIZE, sizeof (char));/* alloc name buf */
 	uptr->disk_ctx = ctx = (struct disk_context *)calloc(1, sizeof(struct disk_context));
-	if ((uptr->filename == NULL) || (uptr->disk_ctx == NULL))  return SCPE_MEM;
-	strncpy (uptr->filename, cptr, CBUFSIZE);               /* save name */
+	if ((uptr->filename == NULL) || (uptr->disk_ctx == NULL)) {
+		free(uptr->filename);
+		free(uptr->disk_ctx);
+		uptr->filename = NULL;
+		uptr->disk_ctx = NULL;
+		return SCPE_MEM;
+	}
+	memcpy(uptr->filename, cptr, strlen(cptr) + 1);        /* save name */
 	ctx->sector_size = (uint32)sector_size;                 /* save sector_size */
 	ctx->capac_factor = ((dptr->dwidth / dptr->aincr) >= 32) ? 8 : ((dptr->dwidth / dptr->aincr) == 16) ? 2 : 1; /* save capacity units (quadword: 8, word: 2, byte: 1) */
 	ctx->xfer_element_size = (uint32)xfer_element_size;     /* save xfer_element_size */
@@ -401,9 +412,11 @@ t_stat sim_disk_attach_ex (UNIT *uptr, const char *cptr, size_t sector_size, siz
 	sim_debug_unit (ctx->dbit, uptr, "sim_disk_attach(unit=%d,filename='%s')\n", (int)(uptr - ctx->dptr->units), uptr->filename);
 	ctx->storage_sector_size = (uint32)sector_size;         /* Default */
     uptr->fileref = fopen(cptr, "rb+");                 /* open r/w */
-    if (uptr->fileref == NULL) return SCPE_OPENERR;
-	fseek(uptr->fileref, 0, SEEK_END);
-	ctx->container_size=ftell(uptr->fileref)/sector_size;
+    if (uptr->fileref == NULL) goto attach_open_error;
+	if (fseek(uptr->fileref, 0, SEEK_END) != 0) goto attach_io_error;
+	file_size = ftell(uptr->fileref);
+	if (file_size < 0) goto attach_io_error;
+	ctx->container_size = file_size / sector_size;
 
 	uptr->flags |= UNIT_ATT;
 	uptr->pos = 0;
@@ -413,6 +426,17 @@ t_stat sim_disk_attach_ex (UNIT *uptr, const char *cptr, size_t sector_size, siz
 	current_unit_size = ((t_offset)uptr->capac)*ctx->capac_factor*((dptr->flags & DEV_SECTORS) ? 512 : 1);
 	printf("sim_disk_attach(unit=%d,filename='%s') OK\n", (int)(uptr - ctx->dptr->units), uptr->filename);
 	return SCPE_OK;
+
+attach_io_error:
+	attach_status = SCPE_IOERR;
+	fclose(uptr->fileref);
+	uptr->fileref = NULL;
+attach_open_error:
+	free(uptr->filename);
+	free(uptr->disk_ctx);
+	uptr->filename = NULL;
+	uptr->disk_ctx = NULL;
+	return attach_status;
 }
 
 t_stat sim_disk_detach (UNIT *uptr) {
@@ -422,13 +446,19 @@ t_stat sim_disk_detach (UNIT *uptr) {
 	if (!(uptr->flags & UNIT_ATT)) return SCPE_UNATT;
 
 	ctx = (struct disk_context *)uptr->disk_ctx;
+	if (ctx == NULL || uptr->fileref == NULL) return SCPE_IERR;
 
 	printf("sim_disk_detach(unit=%d,filename='%s')\n", (int)(uptr - ctx->dptr->units), uptr->filename);
 
 	if (!(uptr->flags & UNIT_ATTABLE)) return SCPE_NOATT;
-	if (!(uptr->flags & UNIT_ATT)) return SCPE_OK;
-	if (NULL == find_dev_from_unit (uptr)) return SCPE_OK;
+	if (NULL == find_dev_from_unit (uptr)) return SCPE_IERR;
 
+	/* Keep the attachment intact on flush failure so the caller can retry.
+	   fclose() invalidates the FILE even on an error, so clear unit state
+	   only after taking a local copy of the handle. */
+	if (uptr->fileref == NULL || fflush(uptr->fileref) != 0) return SCPE_IOERR;
+	FILE *fileref = uptr->fileref;
+	int close_status = fclose(fileref);
 	uptr->flags &= ~(UNIT_ATT | UNIT_RO);
 	uptr->dynflags &= ~(UNIT_NO_FIO | UNIT_DISK_CHK);
 	free(uptr->filename);
@@ -437,9 +467,7 @@ t_stat sim_disk_detach (UNIT *uptr) {
 	free(uptr->disk_ctx);
 	uptr->disk_ctx = NULL;
 	uptr->io_flush = NULL;
-	fclose(uptr->fileref);
-
-	return SCPE_OK;
+	return close_status == 0 ? SCPE_OK : SCPE_IOERR;
 }
 
 t_stat sim_disk_attach_help(FILE *st, DEVICE *dptr, UNIT *uptr, int32 flag, const char *cptr) {

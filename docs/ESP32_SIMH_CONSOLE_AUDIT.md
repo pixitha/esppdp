@@ -1,10 +1,11 @@
 # ESP32-S3 SIMH control-console source audit
 
-Status (2026-10-11): the first SCP command-runtime stage was flashed and
+Status (2026-10-18): the first SCP command-runtime stage was flashed and
 tested on the ESP32-S3. `RUN`, `BOOT`, register examine/deposit, `STEP`, and
 `CONTINUE` now have hardware transcripts. A second stage restores the CPU
 breakpoint table and `BREAK`/`NOBREAK`/`SHOW BREAK`; the basic stop, step,
-clear, and resume path has also been tested on the board. This is not yet
+clear, and resume path has also been tested on the board. Nested `DO` and a
+basic `SET` now have an S3 smoke-test transcript. This is not yet
 the full upstream SIMH control program.
 
 ## Source and behavior boundary
@@ -54,8 +55,8 @@ SCP pauses timer services while at the prompt; `RUN` and `BOOT` clear the
 old event schedule and reset devices before restarting, as upstream does.
 
 This is deliberately narrower than full SCP: no unbounded address ranges,
-structure-backed register arrays, attach/detach, command scripts, logging
-commands, or breakpoint actions. The later parser stage added bounded
+structure-backed register arrays, unrestricted media commands, full command
+scripts, logging commands, or breakpoint actions. The later parser stage added bounded
 circular/unit-backed arrays, symbolic disassembly, and device/unit modifiers.
 `SHOW` reports device/unit state but not all upstream device-specific details.
 Octal is the PDP-11 default; the later parser accepts radix, symbolic, and
@@ -223,6 +224,61 @@ on the board. No panic or disk I/O error appears in this short run. This
 does not validate physical breakpoints, prolonged operation, or a complete
 BOS6 login.
 
+### S3 physical and data breakpoint probe
+
+The pinned Mac SIMH at `36bea593` was run without an attached disk and
+confirmed the following RAM-only sequence. It hits `-P` at `001000`,
+`-W` and `-X` at `001200` with PC `001000`, and `-R` and `-S` at `001200`
+with PC `001006`. `EXAMINE 1200` reads `000001` after each write/read
+pair. The six breakpoint type letters and the corresponding CPU access
+hooks match the ESP source.
+
+`logs/esp32-bos6-20261011-162758.log` confirms the same sequence on the
+S3: `-P` stopped at `PC=001000`; virtual `-W` and physical `-X` stopped
+before the write at `PC=001000`; virtual `-R` and physical `-S` stopped
+before the read at `PC=001006`; and both `EXAMINE 1200` results were
+`000001`. No panic or RK I/O error appears in this short run. The log
+ends at `sim>` after `NOBREAK ALL`; it does not prove resumed BOS6
+operation or disk-shutdown behavior.
+
+On the S3, use a restorable copy of the SD image. After Ctrl+E reaches
+`sim>`, run these commands one at a time and verify each stop before
+proceeding:
+
+```text
+NOBREAK ALL
+BREAK -P 1000
+RUN 1000
+DEPOSIT 1000 012737
+DEPOSIT 1002 1
+DEPOSIT 1004 1200
+DEPOSIT 1006 013700
+DEPOSIT 1010 1200
+DEPOSIT 1012 000777
+NOBREAK ALL
+BREAK -W 1200
+CONTINUE
+NOBREAK ALL
+BREAK -R 1200
+CONTINUE
+EXAMINE 1200
+NOBREAK ALL
+BREAK -X 1200
+GO 1000
+NOBREAK ALL
+BREAK -S 1200
+CONTINUE
+EXAMINE 1200
+NOBREAK ALL
+```
+
+The first instruction writes `1` to guest RAM at `001200`; the second
+reads it into R0. The final `000777` is a self-loop so an unexpected
+miss stays in RAM and does not boot guest software. Do not `CONTINUE`
+after the final `NOBREAK ALL` unless intentionally testing that loop.
+`RUN 1000` resets the guest, so this interrupts its current boot and is
+not a clean disk shutdown. Do not run this on the canonical BOS6 image.
+
 Do not test a memory-range `DEPOSIT` on a running Fuzzball session without
 a copied disk and a known-safe guest RAM region. This particular run used
 full `flash`, which also rewrote SPIFFS at `0x150000`; use `app-flash` for
@@ -237,10 +293,58 @@ future code-only updates that should preserve SPIFFS writes.
    disassembly, `PCQ`, `CPKT`, and `CAPAC`. Deposits and active-transfer
    `CPKT` have not been tested. Keep search expressions, output files, and
    interactive modes separate until their upstream dependencies are ported.
-3. Extend the S3 breakpoint check on a disposable image to cover proceed
-   counts, other types, and repeated hits at a known-safe loop address.
-   `NEXT` remains deferred until the dynamic step-over and parser machinery
-   exist.
-4. Bring over upstream media and script commands with SD-specific safety
-   checks, then compare UART0 and native USB serial separately. A control
-   prompt is not a guest shutdown or guaranteed disk flush.
+3. The S3 has now passed proceed counts, all six basic types, and repeated
+   hits at a known-safe loop address. `NEXT` remains deferred until the
+   dynamic step-over and parser machinery exist.
+4. The first media-command slice now uses upstream-style CTAB dispatch,
+   `find_unit`, and device attach/detach callbacks. It accepts only
+   existing, sector-aligned files directly under `/sdcard/` on an
+   unattached disk unit. It refuses implicit replacement, duplicate image
+   handles, disabled units, and changes to the selected boot unit. `DETACH`
+   can undo only an attachment made at the current prompt before the guest
+   resumes; it refuses units with pending events. The disk adapter now
+   closes its saved FILE pointer correctly and cleans up failed attaches.
+   A host attach/detach lifecycle test and ESP-IDF 6.0.2 build pass; the
+   code has been flashed, but live attach/detach has **not** been S3-tested.
+   It is intentionally narrower
+   than upstream media handling, and is not a guest shutdown or guaranteed
+   filesystem flush.
+5. The first `DO`/`SET` source slice is now built under ESP-IDF 6.0.2 and
+   has passed the nested-script smoke test on the S3. `DO [-E] [-V] /sdcard/file[.sim] [args]`
+   retains nested script files across guest `RUN`/`CONTINUE`/`BOOT` stops;
+   `RETURN` leaves the current file. It follows upstream's `%0`–`%9`,
+   `%*`, and `%%` argument substitution and error/echo switches, with a
+   bounded eight-file stack. Only existing root-level SD-card scripts are
+   accepted. This is not full upstream `DO`: host environment substitutions,
+   `%~` transforms, `CALL`/`GOTO`, `ON`/`IF`, `SHIFT`, labels, and explicit
+   `RETURN` statuses remain unsupported. Unknown substitutions fail visibly.
+   `SET` follows upstream's device/unit → modifier-table → validation
+   callback path for available device/unit modifiers, basic enable/disable,
+   and device display radix; it excludes host-only global options, forced
+   detach, and changing the selected boot disk's configuration. Both paths
+   preserve the existing boot-menu profile. Compare UART0 and native USB
+   serial independently when hardware validation resumes.
+
+### S3 `DO`/`SET` smoke test
+
+The 2026-10-18 run opened `SCPSMOKE.SIM` and executed `SHOW CPU`, then the
+nested `DO` failed with `vfs_fat: open: no free file descriptors`. The SD
+mount had been limited to two open files: the BOS6 image and parent script
+used both. The mount limit is now 17 (boot image, eight staged media, eight
+nested scripts). In `logs/esp32-scp-20261018-174428.log`, `app-flash`
+verified the new image, both scripts opened, `SET CPU OCTAL` returned
+without error, the child returned to the parent, `STEP 1` stopped with
+`Step expired`, the parent examined PC again, and `RETURN` restored
+`sim>`. No FAT descriptor error or panic appeared. This tests the basic
+script path, not the full set of upstream `DO`/`SET` semantics.
+
+Copy `firmware/tests/SCPSMOKE.SIM` and `firmware/tests/SCPCHILD.SIM` to the
+root of a copied/disposable SD card. Use `app-flash` while the current
+partition table and bootloader remain unchanged; full `flash` would also
+rewrite the bundled SPIFFS image. At `sim>`, run
+`SHOW RQ`, `SET RQ0 RD54` (expected refusal: selected boot disk), then
+`DO -E -V /sdcard/SCPSMOKE.SIM CPU`. The script runs a nested `DO`, applies
+the display-radix-only `SET CPU OCTAL`, examines PC, executes one guest
+instruction via `STEP 1`, examines PC after the stop, and returns to `sim>`.
+The `STEP` executes guest code, so use copied writable media. This smoke
+test passed on the S3; a successful build alone would not have established that.

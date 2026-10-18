@@ -1,16 +1,21 @@
 # ESP32 Fuzzball port plan
 
-Status (2026-10-10): the ESP32-S3 N16R8 build runs under ESP-IDF 6.0.2,
+Status (2026-10-18): the ESP32-S3 N16R8 build runs under ESP-IDF 6.0.2,
 boots RT-11 and BOS6 from a four-bit SDMMC card, and has reached a DMILLS
 login in an earlier run. SCP inspection, stepping, reset/boot, and scalar
 deposit have since been tested on the board. The basic breakpoint
-set/show/stop/step/clear/resume path and the PC display correction now have
-board transcripts; proceed counts and other breakpoint types remain; see
-`docs/ESP32_SIMH_CONSOLE_AUDIT.md`.
+set/show/stop/step/clear/resume path, proceed counts, all six basic
+breakpoint types, and the PC display correction now have board transcripts;
+see `docs/ESP32_SIMH_CONSOLE_AUDIT.md`.
 A bounded numeric range/index parser using matching historical SIMH
 primitives has now passed read-only S3 console tests; the surrounding
 command adapter is still a restricted ESP implementation. See the
 October 11 transcript in `docs/ESP32_SIMH_CONSOLE_AUDIT.md`.
+Restricted `ATTACH`/`DETACH` and a first upstream-derived `DO`/`SET`
+command slice now build under ESP-IDF 6.0.2. Nested `DO`, a basic `SET`,
+`STEP`, and `RETURN` passed an S3 smoke test; live `ATTACH`/`DETACH` remain
+untested on the board. Script and media safety limits are documented in
+`docs/ESP32_SIMH_CONSOLE_AUDIT.md`.
 The remaining gates are a full SIMH control console, safe writable-media
 shutdown/recovery, and demonstrated packet I/O. The S3 Ethernet backend is
 currently disabled; this is a no-peer boot result, not a network result.
@@ -172,10 +177,12 @@ runtime has not yet been restored or hardware-validated.
 The ESP port's `scp.c` remains a trimmed launcher, but Ctrl+E now enters a
 separate CTAB/glyph-based command reader. `EXAMINE`, `DEPOSIT`, `SHOW`,
 `STEP`, `CONTINUE`, `RUN`, and `BOOT` have S3 transcripts. The new breakpoint
-table and commands have basic physical validation, but not the complete
-breakpoint behaviors. Device `SET`, media commands, scripts, and the full
-upstream parser remain absent. Numeric memory ranges and plain register
-arrays have read-only S3 evidence, but range deposits have not been tested
+table and commands have board validation for proceed counts and all six
+basic types, but not actions or dynamic step-over. Restricted
+`ATTACH`/`DETACH` are built but not board-tested; nested `DO` and a basic
+`SET` passed an S3 smoke test. Full upstream scripting, global `SET`
+options, and the full parser remain absent. Numeric memory ranges and
+plain register arrays have read-only S3 evidence, but range deposits have not been tested
 on the board. A subsequent upstream-derived device/unit targeting and
 examine/deposit loop increment has passed host safety tests and the ESP-IDF
 6.0.2 build; its read-only device and register probes subsequently passed
@@ -186,8 +193,10 @@ nonzero RD54/RX50 unit capacities. The breakpoint count/type parser and
 table-clear path have an S3 transcript. A two-hit self-loop test exposed
 a non-advancing guest timebase in the ESP event queue; the upstream time
 accounting is restored and passes host sanitizers, an IDF 6.0.2 build,
-and the S3 two-hit loop re-test. A RAM-only deposit was used for that loop;
-range and device deposits remain untested on the board.
+and the S3 two-hit loop re-test. The S3 also passed RAM-only physical
+execute and virtual/physical read/write breakpoint probes. A RAM-only
+deposit was used for these tests; range and device deposits remain untested
+on the board.
 The OLED console is disabled to keep terminal I/O from blocking on
 full-frame refreshes. An earlier run reached the Fuzzball DMILLS login; a durable
 writable-disk lifecycle is not yet established.

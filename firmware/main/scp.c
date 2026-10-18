@@ -340,6 +340,39 @@ DEVICE *find_dev (const char *cptr) {
 	return NULL;
 }
 
+/* Matching upstream SCP find_unit lookup: exact device name selects unit 0,
+   otherwise a device prefix plus decimal unit number or a unit name. */
+DEVICE *find_unit (const char *cptr, UNIT **uptr) {
+	DEVICE *dptr;
+	if (uptr == NULL) return NULL;
+	*uptr = NULL;
+	if (cptr == NULL) return NULL;
+	if ((dptr = find_dev(cptr)) != NULL) {
+		if (dptr->numunits && dptr->units) *uptr = dptr->units;
+		return dptr;
+	}
+	for (int i = 0; (dptr = sim_devices[i]) != NULL; ++i) {
+		const char *names[2] = { dptr->name, dptr->lname };
+		for (size_t n = 0; n < 2; ++n) {
+			const char *name = names[n];
+			if (name == NULL || dptr->numunits == 0 || dptr->units == NULL) continue;
+			size_t len = strlen(name);
+			if (strncmp(cptr, name, len) != 0 || !isdigit((unsigned char)cptr[len])) continue;
+			t_stat status;
+			uint32 unit = (uint32)get_uint(cptr + len, 10, dptr->numunits - 1, &status);
+			if (status == SCPE_OK) *uptr = dptr->units + unit;
+			return dptr;
+		}
+		for (uint32 unit = 0; unit < dptr->numunits; ++unit) {
+			if (strcmp(cptr, sim_uname(&dptr->units[unit])) == 0) {
+				*uptr = &dptr->units[unit];
+				return dptr;
+			}
+		}
+	}
+	return NULL;
+}
+
 DEVICE *find_dev_from_unit (UNIT *uptr) {
 	if (uptr == NULL) return NULL;
 	if (uptr->dptr) return uptr->dptr;

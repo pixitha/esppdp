@@ -1,0 +1,8 @@
+; SCP DO smoke test; STEP executes one guest instruction. Use copied media.
+; Invoke: DO -V /sdcard/SCPSMOKE.SIM CPU
+SHOW %1
+DO /sdcard/SCPCHILD.SIM %1
+EX PC
+STEP 1
+EX PC
+RETURN

@@ -36,6 +36,25 @@ int main(void)
     assert(sim_brk_test(02000, SWMASK('E')) == 0);
     instruction_time = 2;
     assert(sim_brk_test(02000, SWMASK('E')) == SWMASK('E'));
+
+    /* Virtual and physical types at one address keep independent counts. */
+    assert(sim_brk_set(03000, SWMASK('E'), 0, NULL) == SCPE_OK);
+    assert(sim_brk_set(03000, SWMASK('P'), 2, NULL) == SCPE_OK);
+    assert(sim_brk_test(03000, SWMASK('E')) == SWMASK('E'));
+    assert(sim_brk_test(03000, SWMASK('P')) == 0);
+    instruction_time = 3;
+    assert(sim_brk_test(03000, SWMASK('P')) == SWMASK('P'));
+
+    /* Read and write hooks must distinguish virtual from physical types. */
+    assert(sim_brk_set(03002, SWMASK('R'), 0, NULL) == SCPE_OK);
+    assert(sim_brk_set(03002, SWMASK('S'), 0, NULL) == SCPE_OK);
+    assert(sim_brk_set(03002, SWMASK('W'), 0, NULL) == SCPE_OK);
+    assert(sim_brk_set(03002, SWMASK('X'), 0, NULL) == SCPE_OK);
+    assert(sim_brk_test(03002, SWMASK('R')) == SWMASK('R'));
+    assert(sim_brk_test(03002, SWMASK('S')) == SWMASK('S'));
+    assert(sim_brk_test(03002, SWMASK('W')) == SWMASK('W'));
+    assert(sim_brk_test(03002, SWMASK('X')) == SWMASK('X'));
+
     assert(sim_brk_clrall(0) == SCPE_OK);
     assert(sim_brk_summ == 0);
     assert(sim_brk_fnd(01234) == NULL);

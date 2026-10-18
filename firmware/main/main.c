@@ -76,6 +76,9 @@
 
 #define TAG "main"
 
+/* Boot image + up to eight staged disks + eight nested SCP DO scripts. */
+#define SD_CARD_MAX_OPEN_FILES 17
+
 #if CONFIG_ESPPDP_SD_CARD_DIAG
 enum { SD_DIAG_SIZE = 1024 * 1024, SD_DIAG_CHUNK = 4096 };
 
@@ -401,7 +404,7 @@ void app_main(void) {
 	ESP_LOGI(TAG,"Initialize SD-card");
 	esp_vfs_fat_sdmmc_mount_config_t mount_config = {
 		.format_if_mount_failed = false,
-		.max_files = 2,
+		.max_files = SD_CARD_MAX_OPEN_FILES,
 		.allocation_unit_size = 16 * 1024
 	};
 	sdmmc_card_t* card;

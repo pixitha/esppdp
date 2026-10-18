@@ -36,16 +36,42 @@
 #include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 enum { SCP_EX_DEPOSIT, SCP_EX_EXAMINE };
 enum { SCP_RUN_CONTINUE, SCP_RUN_GO, SCP_RUN_BOOT, SCP_RUN_STEP, SCP_RUN_RESET, SCP_RUN_RUN };
 enum { SCP_BRK_SET, SCP_BRK_CLEAR, SCP_BRK_SHOW };
+enum { SCP_MEDIA_ATTACH, SCP_MEDIA_DETACH };
+
+#define SCP_MEDIA_MAX_STAGED 8
+#define SCP_DO_MAX_DEPTH 8
+
+/* Upstream DO retains an open file across RUN/CONTINUE and resumes at the
+   next command when the simulator stops.  Keep that state outside the
+   FreeRTOS command-reader stack for the same reason. */
+typedef struct {
+    FILE *file;
+    char name[CBUFSIZE];
+    char arg_storage[CBUFSIZE];
+    char *arg[10];
+    unsigned line;
+    t_bool echo;
+    t_bool abort_on_error;
+} SCP_DO_FRAME;
 
 static DEVICE *console_bootdev;
 static t_bool console_resume;
+/* A staged attachment can be undone before the guest has seen it.  Once
+   execution resumes, only a guest-aware shutdown can safely eject media. */
+static UNIT *console_staged_media[SCP_MEDIA_MAX_STAGED];
+static size_t console_staged_count;
+static SCP_DO_FRAME *console_do_stack[SCP_DO_MAX_DEPTH];
+static size_t console_do_depth;
 extern const t_value width_mask[];
 extern const REG *sim_PC;
 extern t_addr sim_last_addr;
@@ -67,6 +93,10 @@ static t_stat console_exdep_cmd(int32 flag, CONST char *cptr);
 static t_stat console_show_cmd(int32 flag, CONST char *cptr);
 static t_stat console_help_cmd(int32 flag, CONST char *cptr);
 static t_stat console_break_cmd(int32 flag, CONST char *cptr);
+static t_stat console_media_cmd(int32 flag, CONST char *cptr);
+static t_stat console_do_cmd(int32 flag, CONST char *cptr);
+static t_stat console_return_cmd(int32 flag, CONST char *cptr);
+static t_stat console_set_cmd(int32 flag, CONST char *cptr);
 
 /* Like upstream SCP, command names and arguments are dispatched via CTAB.
    Prefix matching is supplied by find_ctab() in scp.c. */
@@ -81,6 +111,11 @@ static CTAB cmd_table[] = {
     { "BOOT",     console_run_cmd,   SCP_RUN_BOOT },
     { "BREAK",    console_break_cmd, SCP_BRK_SET },
     { "NOBREAK",  console_break_cmd, SCP_BRK_CLEAR },
+    { "ATTACH",   console_media_cmd, SCP_MEDIA_ATTACH },
+    { "DETACH",   console_media_cmd, SCP_MEDIA_DETACH },
+    { "DO",       console_do_cmd,    0 },
+    { "RETURN",   console_return_cmd, 0 },
+    { "SET",      console_set_cmd,   0 },
     { "SHOW",     console_show_cmd,  0 },
     { "HELP",     console_help_cmd,  0 },
     { NULL, NULL, 0 }
@@ -99,6 +134,331 @@ static t_stat parse_number(CONST char *text, uint32 radix, t_value max,
     if (*text == '-' || *text == '+') return SCPE_ARG;
     *value = get_uint(text, radix, max, &status);
     return status;
+}
+
+/* The boot menu and ESP VFS use mounted paths.  Limit live SCP attaches to
+   existing, sector-aligned files directly under /sdcard: no implicit file
+   creation, path traversal, or writes to SPIFFS images. */
+static t_bool console_sd_image_path(CONST char *path)
+{
+    struct stat info;
+    CONST char *name;
+    if (strncmp(path, "/sdcard/", 8) != 0) return FALSE;
+    name = path + 8;
+    if (!*name || *name == '.' || strchr(name, '/') || strchr(name, '\\') ||
+        strstr(name, "..")) return FALSE;
+    return stat(path, &info) == 0 && S_ISREG(info.st_mode) &&
+           info.st_size > 0 && info.st_size % 512 == 0;
+}
+
+static t_bool console_image_in_use(CONST char *path)
+{
+    for (size_t i = 0; sim_devices[i] != NULL; ++i) {
+        DEVICE *dev = sim_devices[i];
+        if (!dev->units) continue;
+        for (uint32 j = 0; j < dev->numunits; ++j) {
+            UNIT *unit = &dev->units[j];
+            if ((unit->flags & UNIT_ATT) && unit->filename &&
+                strcasecmp(unit->filename, path) == 0) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static t_stat console_media_cmd(int32 flag, CONST char *cptr)
+{
+    char unit_name[CBUFSIZE], path[CBUFSIZE];
+    DEVICE *dev;
+    UNIT *unit;
+    t_stat status;
+    size_t index;
+
+    cptr = skip_space(cptr);
+    if (!*cptr) return SCPE_2FARG;
+    if (*cptr == '-') return SCPE_INVSW;
+    cptr = get_glyph(cptr, unit_name, 0);
+    dev = find_unit(unit_name, &unit);
+    if (!dev) return SCPE_NXDEV;
+    if (!unit) return SCPE_NXUN;
+    if ((dev->flags & DEV_DIS) || (unit->flags & UNIT_DIS)) return SCPE_UDIS;
+    if (DEV_TYPE(dev) != DEV_DISK || !(unit->flags & UNIT_ATTABLE) ||
+        !dev->attach || !dev->detach) return SCPE_NOFNC;
+    if (dev == console_bootdev && unit == dev->units) {
+        puts("The selected boot disk cannot be changed at the SCP prompt");
+        return SCPE_NOFNC;
+    }
+
+    cptr = skip_space(cptr);
+    if (flag == SCP_MEDIA_ATTACH) {
+        if (!*cptr) return SCPE_2FARG;
+        cptr = get_glyph_nc(cptr, path, 0);
+        if (*skip_space(cptr)) return SCPE_2MARG;
+        if (!console_sd_image_path(path)) {
+            puts("ATTACH requires an existing sector-aligned /sdcard/ image");
+            return SCPE_ARG;
+        }
+        if (unit->flags & UNIT_ATT) return SCPE_ALATT;
+        if (console_image_in_use(path)) {
+            puts("Image is already attached to another unit");
+            return SCPE_ALATT;
+        }
+        if (console_staged_count == SCP_MEDIA_MAX_STAGED) return SCPE_MEM;
+        status = dev->attach(unit, path);
+        if (status == SCPE_OK)
+            console_staged_media[console_staged_count++] = unit;
+        return status;
+    }
+    if (*cptr) return SCPE_2MARG;
+    for (index = 0; index < console_staged_count; ++index)
+        if (console_staged_media[index] == unit) break;
+    if (index == console_staged_count) {
+        puts("DETACH is allowed only before a newly attached disk is exposed to the guest");
+        return SCPE_NOFNC;
+    }
+    if (sim_is_active(unit)) {
+        puts("Unit has a pending simulator event; detach refused");
+        return SCPE_NOFNC;
+    }
+    status = dev->detach(unit);
+    if (!(unit->flags & UNIT_ATT)) {
+        memmove(&console_staged_media[index], &console_staged_media[index + 1],
+                (console_staged_count - index - 1) * sizeof(console_staged_media[0]));
+        --console_staged_count;
+    }
+    return status;
+}
+
+static void console_do_pop(void)
+{
+    SCP_DO_FRAME *frame;
+    if (!console_do_depth) return;
+    frame = console_do_stack[--console_do_depth];
+    console_do_stack[console_do_depth] = NULL;
+    fclose(frame->file);
+    free(frame);
+}
+
+/* The argument and %0..%9 substitution rules follow upstream do_cmd() and
+   sim_sub_args().  Host environment expansion and %~ path transforms are
+   intentionally rejected until those upstream dependencies are available. */
+static t_stat console_do_expand(char *out, size_t capacity, CONST char *in,
+                                SCP_DO_FRAME *frame)
+{
+    size_t used = 0;
+    while (*in) {
+        CONST char *replacement = NULL;
+        char literal[2] = { 0, 0 };
+        if (*in == '%') {
+            ++in;
+            if (*in == '%') { literal[0] = '%'; replacement = literal; ++in; }
+            else if (*in >= '0' && *in <= '9') replacement = frame->arg[*in++ - '0'];
+            else if (*in == '*') {
+                ++in;
+                for (size_t i = 1; i < 10 && frame->arg[i]; ++i) {
+                    size_t length = strlen(frame->arg[i]);
+                    if (used + length + (i > 1) >= capacity) return SCPE_ARG;
+                    if (i > 1) out[used++] = ' ';
+                    memcpy(out + used, frame->arg[i], length);
+                    used += length;
+                }
+                continue;
+            } else return SCPE_NOFNC;
+        } else {
+            literal[0] = *in++;
+            replacement = literal;
+        }
+        if (replacement) {
+            size_t length = strlen(replacement);
+            if (used + length >= capacity) return SCPE_ARG;
+            memcpy(out + used, replacement, length);
+            used += length;
+        }
+    }
+    out[used] = '\0';
+    return SCPE_OK;
+}
+
+static t_stat console_do_cmd(int32 flag, CONST char *cptr)
+{
+    SCP_DO_FRAME *frame;
+    char *dst;
+    size_t remaining;
+    struct stat info;
+    (void)flag;
+    if (console_do_depth >= SCP_DO_MAX_DEPTH) return SCPE_NEST;
+    frame = calloc(1, sizeof(*frame));
+    if (!frame) return SCPE_MEM;
+    frame->echo = console_do_depth ? console_do_stack[console_do_depth - 1]->echo : FALSE;
+    cptr = skip_space(cptr);
+    while (*cptr == '-') {
+        ++cptr;
+        if (toupper((unsigned char)*cptr) != 'E' &&
+            toupper((unsigned char)*cptr) != 'V') goto bad_switch;
+        while (*cptr && !isspace((unsigned char)*cptr)) {
+            if (toupper((unsigned char)*cptr) == 'E') frame->abort_on_error = TRUE;
+            else if (toupper((unsigned char)*cptr) == 'V') frame->echo = TRUE;
+            else goto bad_switch;
+            ++cptr;
+        }
+        cptr = skip_space(cptr);
+    }
+    dst = frame->arg_storage;
+    remaining = sizeof(frame->arg_storage);
+    for (size_t i = 0; i < 10 && *cptr; ++i) {
+        char quote = 0;
+        frame->arg[i] = dst;
+        if (*cptr == '\'' || *cptr == '"') quote = *cptr++;
+        while (*cptr && (quote ? *cptr != quote : !isspace((unsigned char)*cptr))) {
+            if (remaining < 2) goto bad_arg;
+            *dst++ = *cptr++;
+            --remaining;
+        }
+        if (quote) {
+            if (*cptr != quote) goto bad_arg;
+            ++cptr;
+        }
+        if (remaining < 1) goto bad_arg;
+        *dst++ = '\0';
+        --remaining;
+        if (*cptr && !isspace((unsigned char)*cptr)) goto bad_arg;
+        cptr = skip_space(cptr);
+    }
+    if (*cptr) goto bad_arg;
+    if (!frame->arg[0]) { free(frame); return SCPE_2FARG; }
+    if (strncmp(frame->arg[0], "/sdcard/", 8) != 0 ||
+        !frame->arg[0][8] || frame->arg[0][8] == '.' ||
+        strchr(frame->arg[0] + 8, '/') || strchr(frame->arg[0] + 8, '\\') ||
+        strstr(frame->arg[0] + 8, "..")) goto bad_arg;
+    if (strlen(frame->arg[0]) >= sizeof(frame->name)) goto bad_arg;
+    strcpy(frame->name, frame->arg[0]);
+    if (stat(frame->name, &info) != 0 || !S_ISREG(info.st_mode)) {
+        if (strlen(frame->name) + 4 >= sizeof(frame->name)) goto bad_arg;
+        strcat(frame->name, ".sim");
+        if (stat(frame->name, &info) != 0 || !S_ISREG(info.st_mode)) {
+            free(frame);
+            return SCPE_OPENERR;
+        }
+    }
+    frame->file = fopen(frame->name, "r");
+    if (!frame->file) { free(frame); return SCPE_OPENERR; }
+    console_do_stack[console_do_depth++] = frame;
+    return SCPE_OK;
+bad_switch:
+    free(frame);
+    return SCPE_INVSW;
+bad_arg:
+    free(frame);
+    return SCPE_ARG;
+}
+
+static t_stat console_return_cmd(int32 flag, CONST char *cptr)
+{
+    (void)flag;
+    if (*skip_space(cptr)) return SCPE_2MARG;
+    if (!console_do_depth) return SCPE_NOFNC;
+    console_do_pop();
+    return SCPE_OK;
+}
+
+/* This follows upstream set_cmd's DEVICE/UNIT -> MTAB -> validation-callback
+   path.  Host-only global SET options and forced detachment are omitted. */
+static t_stat console_set_enable(DEVICE *dev, UNIT *unit, t_bool device_scope,
+                                 t_bool enable)
+{
+    if (device_scope) {
+        if (!(dev->flags & DEV_DISABLE)) return SCPE_NOFNC;
+        if (!enable) {
+            if (dev == console_bootdev) return SCPE_NOFNC;
+            for (uint32 i = 0; i < dev->numunits; ++i)
+                if ((dev->units[i].flags & UNIT_ATT) || sim_is_active(&dev->units[i]))
+                    return SCPE_NOFNC;
+        }
+        if (enable) dev->flags &= ~DEV_DIS;
+        else dev->flags |= DEV_DIS;
+        return dev->reset ? dev->reset(dev) : SCPE_OK;
+    }
+    if (!(unit->flags & UNIT_DISABLE)) return SCPE_NOFNC;
+    if (!enable && ((dev == console_bootdev && unit == dev->units) ||
+                    (unit->flags & UNIT_ATT) || sim_is_active(unit))) return SCPE_NOFNC;
+    if (enable) unit->flags &= ~UNIT_DIS;
+    else unit->flags |= UNIT_DIS;
+    return SCPE_OK;
+}
+
+static t_stat console_set_modifier(DEVICE *dev, UNIT *unit, t_bool device_scope,
+                                   char *modifier)
+{
+    char *value = strchr(modifier, '=');
+    MTAB *entry;
+    if (value) *value++ = '\0';
+    if (!*modifier) return SCPE_ARG;
+    if (!value) {
+        if (strcmp(modifier, "ENABLED") == 0)
+            return console_set_enable(dev, unit, device_scope, TRUE);
+        if (strcmp(modifier, "DISABLED") == 0)
+            return console_set_enable(dev, unit, device_scope, FALSE);
+        if (device_scope) {
+            if (strcmp(modifier, "OCTAL") == 0) { dev->dradix = 8; return SCPE_OK; }
+            if (strcmp(modifier, "DECIMAL") == 0) { dev->dradix = 10; return SCPE_OK; }
+            if (strcmp(modifier, "HEX") == 0) { dev->dradix = 16; return SCPE_OK; }
+            if (strcmp(modifier, "BINARY") == 0) { dev->dradix = 2; return SCPE_OK; }
+        }
+    }
+    if (dev == console_bootdev &&
+        (device_scope || unit == dev->units)) return SCPE_NOFNC;
+    if (!dev->modifiers) return SCPE_NOPARAM;
+    for (entry = dev->modifiers; entry->mask; ++entry) {
+        if (!entry->mstring || MATCH_CMD(modifier, entry->mstring) != 0) continue;
+        if (entry->mask & MTAB_XTD) {
+            uint32 scope = device_scope ? MTAB_VDV : MTAB_VUN;
+            if (!(entry->mask & scope & ~MTAB_XTD)) return SCPE_ARG;
+            if (!device_scope && (unit->flags & UNIT_DIS)) return SCPE_UDIS;
+            if ((entry->mask & MTAB_VALR) == MTAB_VALR && !value) return SCPE_MISVAL;
+            if (value && !(entry->mask & (MTAB_VALR | MTAB_VALO) & ~MTAB_XTD))
+                return SCPE_ARG;
+            if (entry->valid) return entry->valid(unit, entry->match, value, entry->desc);
+            if (!entry->desc || value) return SCPE_ARG;
+            *(int32 *)entry->desc = entry->match;
+            return SCPE_OK;
+        }
+        if (value || (unit->flags & UNIT_DIS)) return value ? SCPE_ARG : SCPE_UDIS;
+        if (entry->valid) {
+            t_stat status = entry->valid(unit, entry->match, NULL, entry->desc);
+            if (status != SCPE_OK) return status;
+        }
+        unit->flags = (unit->flags & ~entry->mask) | (entry->match & entry->mask);
+        return SCPE_OK;
+    }
+    return SCPE_NXPAR;
+}
+
+static t_stat console_set_cmd(int32 flag, CONST char *cptr)
+{
+    char target[CBUFSIZE], modifier[CBUFSIZE];
+    DEVICE *dev;
+    UNIT *unit;
+    t_bool device_scope;
+    t_stat status;
+    (void)flag;
+    cptr = skip_space(cptr);
+    if (!*cptr) return SCPE_2FARG;
+    if (*cptr == '-') return SCPE_INVSW; /* In particular, no forced detach. */
+    cptr = get_glyph(cptr, target, 0);
+    dev = find_dev(target);
+    device_scope = dev != NULL;
+    if (device_scope) unit = dev->units;
+    else dev = find_unit(target, &unit);
+    if (!dev) return SCPE_NXDEV;
+    if (!unit) return SCPE_NXUN;
+    if (!*skip_space(cptr)) return SCPE_2FARG;
+    while (*cptr) {
+        cptr = get_glyph_nc(cptr, modifier, ',');
+        for (char *p = modifier; *p && *p != '='; ++p)
+            *p = (char)toupper((unsigned char)*p);
+        status = console_set_modifier(dev, unit, device_scope, modifier);
+        if (status != SCPE_OK) return status;
+    }
+    return SCPE_OK;
 }
 
 /* Upstream sim_run_boot_prep() discards the old event schedule before a
@@ -398,7 +758,10 @@ static t_stat console_help_cmd(int32 flag, CONST char *cptr)
     puts("SHOW [device|BREAK [address]], GO [address], RUN [address], RESET, STEP [count]");
     puts("CONTINUE, BOOT [device or unit], HELP");
     puts("BREAK [-E|-P|-R|-S|-W|-X] [address[count]], NOBREAK [address|ALL]");
-    puts("Breakpoint actions, SET, and full SCP media commands are not ported yet.");
+    puts("ATTACH unit /sdcard/image, DETACH staged-unit (before guest resumes).");
+    puts("DO [-E] [-V] /sdcard/script[.sim] [args], RETURN (inside DO).");
+    puts("SET device|unit modifier[,modifier...] (no forced media detach).");
+    puts("Breakpoint actions, global SET options, and full SCP scripting are not ported yet.");
     return SCPE_OK;
 }
 
@@ -455,15 +818,75 @@ static const char *console_status_text(t_stat status)
     case SCPE_NXDEV: return "No such device";
     case SCPE_NXUN: return "No such unit";
     case SCPE_NXM: return "Non-existent memory";
+    case SCPE_ALATT: return "Unit already attached";
+    case SCPE_UNATT: return "Unit not attached";
+    case SCPE_OPENERR: return "Cannot open existing image";
+    case SCPE_IOERR: return "Media I/O error";
     default: return sim_error_text(status);
+    }
+}
+
+static t_stat console_dispatch(CONST char *line, char *glyph)
+{
+    CONST char *args = get_glyph_cmd(skip_space(line), glyph);
+    CTAB *cmd = find_ctab(cmd_table, glyph);
+    sim_switches = 0;
+    return cmd ? cmd->action(cmd->arg, args) : SCPE_UNK;
+}
+
+static void console_do_pump(void)
+{
+    char line[CBUFSIZE], expanded[CBUFSIZE], glyph[CBUFSIZE];
+    while (console_do_depth && !console_resume) {
+        SCP_DO_FRAME *frame = console_do_stack[console_do_depth - 1];
+        t_stat status;
+        size_t length;
+        unsigned line_number;
+        if (!fgets(line, sizeof(line), frame->file)) {
+            if (ferror(frame->file))
+                printf("%s:%u: %s\n", frame->name, frame->line, console_status_text(SCPE_IOERR));
+            console_do_pop();
+            continue;
+        }
+        ++frame->line;
+        line_number = frame->line;
+        length = strlen(line);
+        if (length && line[length - 1] != '\n' && !feof(frame->file)) {
+            int ch;
+            while ((ch = fgetc(frame->file)) != '\n' && ch != EOF) {}
+            status = SCPE_ARG;
+            strcpy(glyph, "line too long");
+        } else {
+            while (length && (line[length - 1] == '\r' || line[length - 1] == '\n'))
+                line[--length] = '\0';
+            CONST char *command = skip_space(line);
+            if (!*command || *command == '#' || *command == ';' || *command == ':')
+                continue;
+            status = console_do_expand(expanded, sizeof(expanded), command, frame);
+            if (status == SCPE_OK) {
+                if (frame->echo) printf("%s:%u> %s\n", frame->name, frame->line, expanded);
+                status = console_dispatch(expanded, glyph);
+            } else strcpy(glyph, "substitution");
+        }
+        if (status != SCPE_OK) {
+            printf("%s:%u: %s: %s\n", frame->name, frame->line,
+                   glyph, console_status_text(status));
+            if (console_do_depth && frame == console_do_stack[console_do_depth - 1] &&
+                frame->abort_on_error) {
+                console_do_pop();
+                while (console_do_depth &&
+                       console_do_stack[console_do_depth - 1]->abort_on_error)
+                    console_do_pop();
+            }
+        }
+        /* A long, valid script should not monopolize the RTOS. */
+        if ((line_number & 15u) == 0) vTaskDelay(1);
     }
 }
 
 void scp_console_run(DEVICE *bootdev)
 {
     char line[CBUFSIZE], glyph[CBUFSIZE];
-    CONST char *args;
-    CTAB *cmd;
     t_stat status;
     console_bootdev = bootdev;
     console_resume = FALSE;
@@ -471,15 +894,18 @@ void scp_console_run(DEVICE *bootdev)
     sim_host_escape_enable(FALSE);
     puts("\nSIMH SCP command console (ESP port)");
     while (!console_resume) {
+        if (console_do_depth) {
+            console_do_pump();
+            continue;
+        }
         char *input = console_read_line(line, sizeof line);
         if (input == NULL || !*skip_space(input)) continue;
-        args = get_glyph_cmd(skip_space(input), glyph);
-        cmd = find_ctab(cmd_table, glyph);
-        sim_switches = 0;
-        status = cmd ? cmd->action(cmd->arg, args) : SCPE_UNK;
+        status = console_dispatch(input, glyph);
         if (status != SCPE_OK)
             printf("%s%s\n", status == SCPE_UNK ? "Unknown command: " : "SCP: ",
                    status == SCPE_UNK ? glyph : console_status_text(status));
     }
+    /* Do not allow a later prompt to eject media the guest may have used. */
+    console_staged_count = 0;
     sim_host_escape_enable(TRUE);
 }
