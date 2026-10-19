@@ -81,5 +81,14 @@ menu "ESP-PDP11 Configuration"
             Initialize a common SSD1306 128x64 I2C OLED at address 0x3C and
             render a high-contrast wiring test before starting the emulator.
 
+    config ESPPDP_BOOT_OLED
+        bool "Show BIOS boot menu and status on SSD1306 OLED"
+        depends on ESPPDP_HW_S3_DEVKITC
+        default n
+        help
+            Initialize an optional SSD1306 128x64 I2C OLED on GPIO18 (SDA) and
+            GPIO17 (SCL), then mirror the boot menu and hardware status there.
+            If no display responds, the serial boot menu remains available.
+
 
 endmenu

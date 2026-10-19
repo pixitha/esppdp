@@ -10,6 +10,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <psa/crypto.h>
+
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -226,6 +228,38 @@ static bool decode_filename(const char *query, char *name, size_t name_size)
     return safe_filename(name);
 }
 
+static bool file_sha256_hex(const char *path, char hex[65])
+{
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    psa_hash_operation_t operation = PSA_HASH_OPERATION_INIT;
+    uint8_t digest[32];
+    size_t digest_length = 0;
+    bool ok = psa_crypto_init() == PSA_SUCCESS &&
+              psa_hash_setup(&operation, PSA_ALG_SHA_256) == PSA_SUCCESS;
+    uint8_t buffer[4096];
+    while (ok) {
+        size_t count = fread(buffer, 1, sizeof buffer, file);
+        if (count && psa_hash_update(&operation, buffer, count) != PSA_SUCCESS)
+            ok = false;
+        if (count) vTaskDelay(1);
+        if (count < sizeof buffer) {
+            if (ferror(file)) ok = false;
+            break;
+        }
+    }
+    if (ok && psa_hash_finish(&operation, digest, sizeof digest,
+                              &digest_length) != PSA_SUCCESS)
+        ok = false;
+    if (!ok) (void)psa_hash_abort(&operation);
+    fclose(file);
+    if (!ok || digest_length != sizeof digest) return false;
+    for (size_t i = 0; i < sizeof digest; ++i)
+        snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    hex[64] = '\0';
+    return true;
+}
+
 static esp_err_t upload_handler(httpd_req_t *request)
 {
     note_activity();
@@ -301,6 +335,7 @@ static esp_err_t upload_handler(httpd_req_t *request)
         }
         remaining -= (size_t)received;
         note_activity();
+        vTaskDelay(1);
     }
     if (fflush(file) != 0 || fsync(fileno(file)) != 0) failed = true;
     if (fclose(file) != 0) failed = true;
@@ -309,6 +344,8 @@ static esp_err_t upload_handler(httpd_req_t *request)
     if (!failed && (stat(temporary, &uploaded) != 0 ||
                     (uint64_t)uploaded.st_size != (uint64_t)request->content_len))
         failed = true;
+    char sha256[65] = {0};
+    if (!failed && !file_sha256_hex(temporary, sha256)) failed = true;
     if (!failed && rename(temporary, destination) != 0) failed = true;
     if (failed) {
         unlink(temporary);
@@ -320,9 +357,10 @@ static esp_err_t upload_handler(httpd_req_t *request)
     xSemaphoreGive(s_upload_lock);
     ESP_LOGI(TAG, "Uploaded %s (%" PRIu64 " bytes)", name,
              (uint64_t)uploaded.st_size);
-    char response[128];
-    snprintf(response, sizeof response, "Stored %s (%" PRIu64 " bytes)", name,
-             (uint64_t)uploaded.st_size);
+    char response[192];
+    snprintf(response, sizeof response,
+             "Stored %s (%" PRIu64 " bytes, SHA-256 %s)", name,
+             (uint64_t)uploaded.st_size, sha256);
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     return httpd_resp_sendstr(request, response);
 }

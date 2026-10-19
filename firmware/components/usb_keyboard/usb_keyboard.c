@@ -14,6 +14,7 @@ static const char *TAG = "usb_keyboard";
 static QueueHandle_t key_queue;
 static bool started;
 static bool report_logged;
+static volatile usb_keyboard_status_t keyboard_status = USB_KEYBOARD_NOT_STARTED;
 
 static int key_to_ascii(uint8_t modifier, uint8_t key)
 {
@@ -71,6 +72,7 @@ static void hid_interface_callback(hid_host_device_handle_t device,
     } else if (event == HID_HOST_INTERFACE_EVENT_DISCONNECTED) {
         ESP_LOGI(TAG, "keyboard disconnected");
         report_logged = false;
+        keyboard_status = USB_KEYBOARD_HOST_READY;
         hid_host_device_close(device);
     } else if (event == HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR) {
         ESP_LOGW(TAG, "keyboard input transfer error");
@@ -115,8 +117,10 @@ static void hid_device_callback(hid_host_device_handle_t device,
         err = hid_class_request_set_idle(device, 0, 0);
         ESP_LOGI(TAG, "set idle: %s", esp_err_to_name(err));
     }
-    if (hid_host_device_start(device) == ESP_OK)
+    if (hid_host_device_start(device) == ESP_OK) {
+        keyboard_status = USB_KEYBOARD_CONNECTED;
         ESP_LOGI(TAG, "USB HID keyboard connected");
+    }
 }
 
 static void usb_events_task(void *arg)
@@ -134,7 +138,10 @@ void usb_keyboard_start(void)
 {
     if (started) return;
     key_queue = xQueueCreate(32, sizeof(int));
-    if (!key_queue) return;
+    if (!key_queue) {
+        keyboard_status = USB_KEYBOARD_START_FAILED;
+        return;
+    }
     const usb_host_config_t host_config = {
         .skip_phy_setup = false,
         .intr_flags = ESP_INTR_FLAG_LOWMED,
@@ -142,10 +149,14 @@ void usb_keyboard_start(void)
     esp_err_t err = usb_host_install(&host_config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "USB host install failed: %s", esp_err_to_name(err));
+        keyboard_status = USB_KEYBOARD_START_FAILED;
         return;
     }
     if (xTaskCreatePinnedToCore(usb_events_task, "usb_events", 4096, NULL, 2,
-                                NULL, 0) != pdPASS) return;
+                                NULL, 0) != pdPASS) {
+        keyboard_status = USB_KEYBOARD_START_FAILED;
+        return;
+    }
     const hid_host_driver_config_t config = {
         .create_background_task = true,
         .task_priority = 5,
@@ -154,13 +165,20 @@ void usb_keyboard_start(void)
         .callback = hid_device_callback,
         .callback_arg = NULL,
     };
+    keyboard_status = USB_KEYBOARD_HOST_READY;
     err = hid_host_install(&config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "HID host install failed: %s", esp_err_to_name(err));
+        keyboard_status = USB_KEYBOARD_START_FAILED;
         return;
     }
     started = true;
     ESP_LOGI(TAG, "USB HID keyboard host ready on native USB OTG");
+}
+
+usb_keyboard_status_t usb_keyboard_get_status(void)
+{
+    return keyboard_status;
 }
 
 int usb_keyboard_getchar(void)

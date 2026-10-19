@@ -1116,6 +1116,9 @@ int main (int argc, char *argv[]) {
 		printf("BOS6 profile: 2048K, 60Hz, KWV11, DMV, DLI/DLO, RX, XQ DEQNA, RQ0 RD54\n");
 	}
 
+	#ifdef ESP_PLATFORM
+	printf("SIMH PHASE: attaching selected image %s\n", boot->path);
+	#endif
 	if (has_bsd_dsk) {
 		//find rq device, boot off it
 		dev=find_dev("RQ");
@@ -1166,6 +1169,10 @@ int main (int argc, char *argv[]) {
 		fprintf(stderr, "Disk attach failed: %s\n", sim_error_text(status));
 		return EXIT_FAILURE;
 	}
+	#ifdef ESP_PLATFORM
+	printf("SIMH PHASE: disk attachment succeeded\n");
+	printf("SIMH PHASE: starting device bootstrap\n");
+	#endif
 	status=dev->boot(0, dev);
 	if (status != SCPE_OK) {
 		fprintf(stderr, "Boot failed: %s\n", sim_error_text(status));
@@ -1173,12 +1180,13 @@ int main (int argc, char *argv[]) {
 	}
 #ifdef ESP_PLATFORM
 	boot_menu_remember();
+	printf("SIMH PHASE: bootstrap succeeded; choice saved\n");
 #endif
 
 	sim_throt_sched(); // Initialize throttling mechanism
 	sim_start_timer_services(); //Enable wall clock timing
 
-	printf("Main sim start\n");
+	printf("SIMH PHASE: instruction execution started; guest OS boot is not verified\n");
 #ifdef ESP_PLATFORM
 	sim_host_escape_enable(TRUE);
 #endif

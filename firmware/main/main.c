@@ -308,7 +308,7 @@ static void oled_diagnostic(void)
 		return;
 	}
 	oled_ssd1306_console_clear();
-	const char *ready = "OLED READY\n";
+	const char *ready = "PixelFonts 5x5\nAaBb 0123 !?@#\n[]{}<>+-=*/\\\nOLED READY\n";
 	for (const char *p = ready; *p; ++p) oled_ssd1306_console_putc(*p);
 	ESP_LOGI(TAG, "OLED console initialized");
 }
@@ -321,8 +321,9 @@ static void simh_task(void *arg)
 {
 	(void)arg;
 	char *args[] = {"simh", NULL};
-	main(1, args);
-	/* main() is intended to run forever; keep the task safe if it returns. */
+	int result = main(1, args);
+	ESP_LOGE(TAG, "SIMH runtime returned with status %d; reset is required to return to boot menu",
+		 result);
 	vTaskDelete(NULL);
 }
 #endif
@@ -548,4 +549,14 @@ void app_main(void) {
 		return;
 	}
 	ESP_LOGI(TAG, "SIMH task started on CPU1");
+#if CONFIG_ESPPDP_BOOT_OLED
+	/* Replace the stale boot-menu frame. SIMH output remains on the serial
+	 * console; the OLED is a status display, not a terminal mirror. */
+	const char *oled_lines[] = {
+		"FUZZBALL SIMH", "SIMULATOR ACTIVE", "PDP-11 CONSOLE", "ON SERIAL",
+	};
+	if (oled_ssd1306_render_lines(oled_lines,
+			sizeof oled_lines / sizeof oled_lines[0]) != ESP_OK)
+		ESP_LOGW(TAG, "Unable to update OLED for simulator startup");
+#endif
 }

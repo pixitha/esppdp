@@ -4,6 +4,7 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "pixelfont_5x5_thin.h"
 
 #define TAG "oled_ssd1306"
 
@@ -12,6 +13,7 @@ static i2c_master_dev_handle_t s_device;
 static uint8_t s_buffer[OLED_SSD1306_WIDTH * OLED_SSD1306_HEIGHT / 8];
 static uint8_t s_console_x;
 static uint8_t s_console_y;
+static uint8_t s_device_address;
 static bool s_ready;
 
 static esp_err_t transmit(const uint8_t *data, size_t length)
@@ -50,45 +52,9 @@ static esp_err_t write_buffer(void)
     return ESP_OK;
 }
 
-static void glyph(char c, uint8_t out[5])
+static void glyph(char c, uint8_t out[6])
 {
-    static const uint8_t upper[26][5] = {
-        {0x7E,0x11,0x11,0x11,0x7E},{0x7F,0x49,0x49,0x49,0x36},
-        {0x3E,0x41,0x41,0x41,0x22},{0x7F,0x41,0x41,0x22,0x1C},
-        {0x7F,0x49,0x49,0x49,0x41},{0x7F,0x09,0x09,0x09,0x01},
-        {0x3E,0x41,0x49,0x49,0x7A},{0x7F,0x08,0x08,0x08,0x7F},
-        {0x00,0x41,0x7F,0x41,0x00},{0x20,0x40,0x41,0x3F,0x01},
-        {0x7F,0x08,0x14,0x22,0x41},{0x7F,0x40,0x40,0x40,0x40},
-        {0x7F,0x02,0x0C,0x02,0x7F},{0x7F,0x04,0x08,0x10,0x7F},
-        {0x3E,0x41,0x41,0x41,0x3E},{0x7F,0x09,0x09,0x09,0x06},
-        {0x3E,0x41,0x51,0x21,0x5E},{0x7F,0x09,0x19,0x29,0x46},
-        {0x46,0x49,0x49,0x49,0x31},{0x01,0x01,0x7F,0x01,0x01},
-        {0x3F,0x40,0x40,0x40,0x3F},{0x1F,0x20,0x40,0x20,0x1F},
-        {0x7F,0x20,0x18,0x20,0x7F},{0x63,0x14,0x08,0x14,0x63},
-        {0x07,0x08,0x70,0x08,0x07},{0x61,0x51,0x49,0x45,0x43},
-    };
-    static const uint8_t digits[10][5] = {
-        {0x3E,0x45,0x49,0x51,0x3E},{0x00,0x41,0x7F,0x40,0x00},
-        {0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},
-        {0x18,0x14,0x12,0x7F,0x10},{0x27,0x45,0x45,0x45,0x39},
-        {0x3C,0x4A,0x49,0x49,0x30},{0x01,0x71,0x09,0x05,0x03},
-        {0x36,0x49,0x49,0x49,0x36},{0x06,0x49,0x49,0x29,0x1E},
-    };
-    memset(out, 0, 5);
-    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-    if (c >= 'A' && c <= 'Z') memcpy(out, upper[c - 'A'], 5);
-    else if (c >= '0' && c <= '9') memcpy(out, digits[c - '0'], 5);
-    else if (c == '-') out[1] = out[2] = out[3] = 0x08;
-    else if (c == '_') out[4] = 0x08;
-    else if (c == '.') out[0] = 0x40;
-    else if (c == ':') { out[1] = 0x36; }
-    else if (c == '/') { out[0] = 0x60; out[1] = 0x18; out[2] = 0x06; }
-    else if (c == '>') { out[0] = 0x41; out[1] = 0x22; out[2] = 0x14; out[3] = 0x08; }
-    else if (c == '<') { out[3] = 0x08; out[2] = 0x14; out[1] = 0x22; out[0] = 0x41; }
-    else if (c == '@') { out[0] = 0x3E; out[1] = 0x41; out[2] = 0x5D; out[3] = 0x55; out[4] = 0x1E; }
-    else if (c == '?') { out[0] = 0x02; out[1] = 0x01; out[2] = 0x51; out[3] = 0x09; out[4] = 0x06; }
-    else if (c == '!') { out[2] = 0x5F; }
-    else if (c == '*') { out[1] = 0x14; out[2] = 0x08; out[3] = 0x14; }
+    memcpy(out, pixelfont_5x5_thin_ascii[(unsigned char)c - 0x20], 6);
 }
 
 static esp_err_t flush_console(void)
@@ -115,6 +81,7 @@ static void scroll_console_if_needed(void)
 esp_err_t oled_ssd1306_init(const oled_ssd1306_config_t *config)
 {
     ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, TAG, "configuration is required");
+    if (s_ready) return ESP_OK;
     i2c_master_bus_config_t bus_config = {
         .i2c_port = config->port,
         .sda_io_num = config->sda_gpio,
@@ -147,12 +114,72 @@ esp_err_t oled_ssd1306_init(const oled_ssd1306_config_t *config)
         0xAF,
     };
     ESP_RETURN_ON_ERROR(command_list(init, sizeof(init)), TAG, "OLED initialization failed");
+    s_device_address = device_config.device_address;
     s_ready = true;
     s_console_x = 0;
     s_console_y = 0;
     memset(s_buffer, 0, sizeof(s_buffer));
     ESP_LOGI(TAG, "SSD1306 OLED ready at I2C address 0x%02x", device_config.device_address);
     return ESP_OK;
+}
+
+bool oled_ssd1306_get_address(uint8_t *address)
+{
+    if (!s_ready || !address) return false;
+    *address = s_device_address;
+    return true;
+}
+
+esp_err_t oled_ssd1306_scan_i2c(uint8_t *addresses, size_t capacity,
+                                size_t *found_count, uint8_t *failed_address)
+{
+    ESP_RETURN_ON_FALSE(s_bus != NULL, ESP_ERR_INVALID_STATE, TAG,
+                        "I2C bus is not initialized");
+    ESP_RETURN_ON_FALSE(found_count != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "found count is required");
+    ESP_RETURN_ON_FALSE(addresses != NULL || capacity == 0, ESP_ERR_INVALID_ARG,
+                        TAG, "address buffer is required");
+    *found_count = 0;
+    if (failed_address) *failed_address = 0xff;
+
+    /* Skip reserved 7-bit ranges; probes send only address + START/STOP. */
+    for (uint16_t address = 0x08; address <= 0x77; ++address) {
+        esp_err_t err = i2c_master_probe(s_bus, address, 20);
+        if (err == ESP_ERR_NOT_FOUND) continue;
+        if (err != ESP_OK) {
+            if (failed_address) *failed_address = (uint8_t)address;
+            return err;
+        }
+        if (*found_count >= capacity) return ESP_ERR_INVALID_SIZE;
+        addresses[(*found_count)++] = (uint8_t)address;
+    }
+    return ESP_OK;
+}
+
+esp_err_t oled_ssd1306_render_lines(const char *const lines[], size_t line_count)
+{
+    ESP_RETURN_ON_FALSE(s_ready, ESP_ERR_INVALID_STATE, TAG, "OLED is not initialized");
+    ESP_RETURN_ON_FALSE(lines != NULL || line_count == 0,
+                        ESP_ERR_INVALID_ARG, TAG, "line array is required");
+
+    memset(s_buffer, 0, sizeof(s_buffer));
+    s_console_x = 0;
+    s_console_y = 0;
+    const size_t rows = line_count < OLED_SSD1306_HEIGHT / 8
+        ? line_count : OLED_SSD1306_HEIGHT / 8;
+    const size_t columns = OLED_SSD1306_WIDTH / 6;
+    for (size_t row = 0; row < rows; ++row) {
+        if (!lines[row]) continue;
+        for (size_t column = 0; column < columns && lines[row][column]; ++column) {
+            unsigned char ch = (unsigned char)lines[row][column];
+            if (ch < 0x20 || ch > 0x7e) ch = '?';
+            uint8_t columns_data[6];
+            glyph((char)ch, columns_data);
+            memcpy(&s_buffer[row * OLED_SSD1306_WIDTH + column * 6],
+                   columns_data, sizeof columns_data);
+        }
+    }
+    return flush_console();
 }
 
 esp_err_t oled_ssd1306_clear(void)
@@ -192,18 +219,16 @@ void oled_ssd1306_console_putc(char c)
             s_console_y++;
             scroll_console_if_needed();
         }
-        uint8_t columns[5];
+        uint8_t columns[6];
         glyph(c, columns);
         /*
-         * Render a clean fixed-width 6x8 terminal cell: five glyph columns
-         * plus one blank spacing column. The glyph occupies one SSD1306 page,
-         * leaving the full eight-line terminal layout available.
+         * PixelFonts is rendered into the existing 6x8 terminal cell. The
+         * font's glyph data occupies up to six columns and one SSD1306 page.
          */
         const size_t page = s_console_y;
-        for (uint8_t x = 0; x < 5; ++x) {
+        for (uint8_t x = 0; x < 6; ++x) {
             s_buffer[page * OLED_SSD1306_WIDTH + s_console_x + x] = columns[x];
         }
-        s_buffer[page * OLED_SSD1306_WIDTH + s_console_x + 5] = 0;
         s_console_x += 6;
     }
     (void)flush_console();

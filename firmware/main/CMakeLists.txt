@@ -4,7 +4,7 @@ idf_component_register(SRCS "main.c" "pdp11_cis.c" "pdp11_cpu.c" "pdp11_cpumod.c
 					"sim_serial.c" "sim_sock.c" "sim_term.c" "sim_timer.c" "hexdump.c" "wifi_if_esp32.c" 
 					"wifi_if_esp32_packet_filter.c" "wifid.c"
                     INCLUDE_DIRS "."
-                    REQUIRES status_led boards ie15term usb_keyboard epaper_154c oled_ssd1306 esp_timer nvs_flash spiffs fatfs mbedtls driver esp_driver_usb_serial_jtag esp_wifi esp_netif esp_event esp_http_server)
+                    REQUIRES status_led boards ie15term usb_keyboard epaper_154c oled_ssd1306 esp_timer nvs_flash spiffs fatfs mbedtls driver esp_driver_usb_serial_jtag esp_wifi esp_netif esp_event esp_http_server esp_psram spi_flash)
 
 target_sources(${COMPONENT_LIB} PRIVATE boot_menu.c sd_upload_portal.c)
 

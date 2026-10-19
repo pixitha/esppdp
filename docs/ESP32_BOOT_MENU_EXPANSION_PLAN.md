@@ -155,6 +155,26 @@ report its result without preventing entry to the boot menu, and avoid writing
 to SD images or NVS. A later interactive diagnostics mode may add deliberate
 tests, but it must state the test scope and any side effects before starting.
 
+The current S3 boot menu includes a compact capability/input summary and an
+`H` hardware inventory page. It reports ESP model/revision/cores, point-in-time
+heap and PSRAM, detected flash size, SPIFFS and SD mount/capacity, USB HID host
+and keyboard state, OLED response, and Wi-Fi/BLE/Classic Bluetooth chip
+features. Radio feature flags describe what the chip supports; the inventory
+does not start Wi-Fi or BLE. The OLED mirrors a compact subset. Refresh is
+manual with `R`, keeping the page stable while avoiding repeated probes. Only
+configured board paths are checked; unassigned pins and accessory buses remain
+explicitly unscanned.
+
+The configured I²C bus can be scanned on demand from the inventory screen.
+Probe only standard 7-bit addresses (`0x08`–`0x77`) with address-only
+transactions and a bounded timeout. When an ACKing address matches a device
+already initialized by a configured driver, label it with that driver's
+functional device name; describe the SSD1306 as compatible rather than
+claiming an exact controller model. Leave other ACKing addresses unidentified.
+An ACK is discovery evidence, not a functional test. Stop and report an
+incomplete scan if the bus times out. Do not probe other GPIO pairs or attempt
+register reads/writes without a known device and datasheet.
+
 ### Local SD upload portal
 
 The Launcher-inspired web UI is a priority feature because transferring files
@@ -218,14 +238,43 @@ out. Exit through the browser, `Q` on serial, or the ten-minute idle timeout.
 The ESP-IDF 6.0.2 build passed and the application was flashed to the
 ESP32-S3 N16R8 using app-only flash. Hardware validation confirmed the setup
 access point and HTTP server start, serial credential save/masked input/clear,
-and browser-visible SD inventory with file sizes. The board was left with the
-portal setup access point running after test credentials were cleared. A
-personal Wi-Fi station connection and systematic upload interruption/recovery
-tests remain open. The app image is 0x1510b0 bytes; the source partition table
-reserves 0x170000 for the app and 0x5d0000 for SPIFFS. This moves the SPIFFS
-start from 0x150000 to 0x180000. Preserve/restore any board SPIFFS state before
-flashing this partition layout. The connected BOS6 image may have received
-guest disk writes during an automatic boot timeout; use a disposable copy.
+and browser-visible SD inventory with file sizes. A BIOS-style serial selector
+now reports measured ESP32/PSRAM/SD status, names each supported profile,
+shows the selected image and writable-media warning, supports Up/Down and
+`J/K`, and pauses its countdown on navigation. Stable entry IDs are persisted
+after successful attachment/bootstrap, with the previous `last_path` setting
+as a migration fallback. The flashed OLED-enabled build was 0x1598b0 bytes,
+leaving about 6% of the
+0x170000-byte app partition free. App-only flash preserves the partition
+table and SPIFFS; the source layout reserves 0x5d0000 for SPIFFS at 0x180000.
+The board joined its saved Wi-Fi network, received a DHCP address, and the
+browser loaded the portal. An 8 MiB upload attempt stalled at about 2% and
+triggered an interrupt watchdog reset before completion. A following reboot
+auto-started `/sdcard/BOS6.IMG`; it reached the RT-11/BOS6 prompt, and the
+writable image may have been modified. The board was left running the guest
+without another reset. Do not treat this SD image as pristine. Source changes
+now yield during upload/hash work and suppress auto-start after watchdog,
+panic, or brownout resets; these changes built successfully but have not been
+flashed or validated on hardware.
+
+System Configuration now has Main, Boot, Storage, Hardware, and Info pages,
+with default entry, timeout, Show POST, Auto Start, Restore Defaults, and Save
+& Exit. A hardware reset confirmed settings persistence; temporary test values
+were restored. Serial navigation was checked. OLED visual readability remains
+unchecked, and HID navigation awaits the needed USB adapter. Low-space upload
+testing remains deferred to a disposable or nearly-full card.
+
+The optional SSD1306 view is enabled for the S3 DevKitC configuration and
+uses GPIO18/17 with address detection at `0x3C`/`0x3D`. On 2026-10-18 the
+connected panel acknowledged at `0x3C`; boot and setup frames were transmitted
+without I2C errors. The serial display-status row reports the probe result.
+The hardware inventory was subsequently checked on the board: its I²C scan
+reported one responder at `0x3C` and identified it as the configured
+SSD1306-compatible boot display. The address match is grounded in the active
+display driver; any other responding addresses remain unidentified. The scan
+does not establish an exact controller model. Visual readability, contrast, or
+clipping still need a direct check. If the panel is absent, boot continues
+through serial.
 
 ### Configuration behavior
 
@@ -241,6 +290,14 @@ The initial persistent settings are:
 - Auto Start: control whether the default entry launches after the countdown.
 - Defaults: restore firmware defaults without erasing media or unrelated NVS.
 - Save & Exit: validate and commit settings atomically, then return to startup.
+
+Implemented in setup: Main, Boot, Storage, Hardware, and Info pages; default
+boot selection, a bounded 5/10/15/30-second timeout, Show POST, auto-start,
+Restore Defaults, and Save & Exit. Defaults restore only boot-menu settings.
+Serial navigation and persistence across a hardware reset were checked; test
+values were restored after the persistence check. OLED visual readability and
+HID input still need separate physical checks. Console appearance options
+remain deferred until a renderer supports them.
 
 Console appearance settings such as VT100 mode, DEC font, and cursor style are
 future renderer capabilities. Do not persist options that the current serial
