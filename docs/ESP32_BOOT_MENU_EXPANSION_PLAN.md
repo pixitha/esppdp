@@ -253,9 +253,12 @@ triggered an interrupt watchdog reset before completion. A following reboot
 auto-started `/sdcard/BOS6.IMG`; it reached the RT-11/BOS6 prompt, and the
 writable image may have been modified. The board was left running the guest
 without another reset. Do not treat this SD image as pristine. Source changes
-now yield during upload/hash work and suppress auto-start after watchdog,
-panic, or brownout resets; these changes built successfully but have not been
-flashed or validated on hardware.
+now disable station modem sleep during portal use, pin HTTP handling to CPU1 on
+dual-core targets, yield during upload/hash work, log transfer stages, and
+suppress auto-start after watchdog, panic, or brownout resets. The WDT backtrace
+ran through Wi-Fi power management on CPU0, but the underlying trigger is not
+proven. These changes build successfully but have not been flashed or validated
+on hardware.
 
 System Configuration now has Main, Boot, Storage, Hardware, and Info pages,
 with default entry, timeout, Show POST, Auto Start, Restore Defaults, and Save

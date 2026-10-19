@@ -153,9 +153,12 @@ Remaining validation checklist:
 1. Upload a disposable large file, then compare its reported on-card SHA-256
    and size with the source. An 8 MiB upload attempt did not complete: the
    ESP32 hit an interrupt watchdog and rebooted while receiving it. The browser
-   reached the portal, but no upload integrity result was produced. Yielding
-   was added to the receive and hash loops; this fix has not been flashed or
-   retested yet.
+   reached the portal, but no upload integrity result was produced. The WDT
+   backtrace ran through Wi-Fi power management on CPU0; the underlying trigger
+   is not proven. Current source disables station modem sleep during portal
+   use, pins HTTP handling to CPU1 on dual-core targets, yields during transfer
+   and hashing, and logs receive/flush/hash stages. This mitigation builds but
+   has not been flashed or retested yet.
 2. Test station-mode failure fallback with unavailable credentials. Successful
    station association to the saved network, DHCP address assignment, and
    browser reachability were confirmed.

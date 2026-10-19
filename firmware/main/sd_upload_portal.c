@@ -325,7 +325,12 @@ static esp_err_t upload_handler(httpd_req_t *request)
 
     char buffer[4096];
     size_t remaining = request->content_len;
+    size_t received_total = 0;
+    size_t next_progress_log = 1024 * 1024;
+    int64_t upload_started_us = esp_timer_get_time();
     bool failed = false;
+    ESP_LOGI(TAG, "Receiving %s (%u bytes)", name,
+             (unsigned)request->content_len);
     while (remaining > 0) {
         size_t chunk = remaining < sizeof buffer ? remaining : sizeof buffer;
         int received = httpd_req_recv(request, buffer, chunk);
@@ -334,19 +339,50 @@ static esp_err_t upload_handler(httpd_req_t *request)
             break;
         }
         remaining -= (size_t)received;
+        received_total += (size_t)received;
         note_activity();
         vTaskDelay(1);
+        if (received_total >= next_progress_log) {
+            ESP_LOGI(TAG, "Upload receive progress: %u/%u bytes in %lld ms",
+                     (unsigned)received_total, (unsigned)request->content_len,
+                     (long long)((esp_timer_get_time() - upload_started_us) / 1000));
+            next_progress_log += 1024 * 1024;
+        }
     }
-    if (fflush(file) != 0 || fsync(fileno(file)) != 0) failed = true;
-    if (fclose(file) != 0) failed = true;
+    if (failed)
+        ESP_LOGW(TAG, "Upload receive failed at %u/%u bytes",
+                 (unsigned)received_total, (unsigned)request->content_len);
+    else
+        ESP_LOGI(TAG, "Upload received; flushing temporary file");
+    if (fflush(file) != 0) {
+        ESP_LOGE(TAG, "Upload buffer flush failed");
+        failed = true;
+    }
+    if (fsync(fileno(file)) != 0) {
+        ESP_LOGE(TAG, "Upload SD sync failed");
+        failed = true;
+    }
+    if (fclose(file) != 0) {
+        ESP_LOGE(TAG, "Upload file close failed");
+        failed = true;
+    }
 
     struct stat uploaded;
     if (!failed && (stat(temporary, &uploaded) != 0 ||
                     (uint64_t)uploaded.st_size != (uint64_t)request->content_len))
         failed = true;
     char sha256[65] = {0};
-    if (!failed && !file_sha256_hex(temporary, sha256)) failed = true;
-    if (!failed && rename(temporary, destination) != 0) failed = true;
+    if (!failed) {
+        ESP_LOGI(TAG, "Upload flushed; checking on-card size and SHA-256");
+        if (!file_sha256_hex(temporary, sha256)) {
+            ESP_LOGE(TAG, "Upload read-back SHA-256 failed");
+            failed = true;
+        }
+    }
+    if (!failed && rename(temporary, destination) != 0) {
+        ESP_LOGE(TAG, "Unable to publish completed upload as %s", name);
+        failed = true;
+    }
     if (failed) {
         unlink(temporary);
         xSemaphoreGive(s_upload_lock);
@@ -621,6 +657,9 @@ static esp_err_t start_wifi_sta(const char *ssid, const char *password)
     result = esp_wifi_start();
     if (result != ESP_OK) goto fail_handlers;
     s_wifi_is_sta = true;
+    /* This is a file-transfer portal; keep the radio awake during uploads. */
+    result = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (result != ESP_OK) goto fail_started;
     result = esp_wifi_connect();
     if (result != ESP_OK) goto fail_started;
 
@@ -739,6 +778,12 @@ esp_err_t sd_upload_portal_run(sd_upload_cancel_fn cancel_requested)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
+#if CONFIG_FREERTOS_UNICORE
+    config.core_id = 0;
+#else
+    /* Keep synchronous FAT/SD operations away from the Wi-Fi task's core. */
+    config.core_id = 1;
+#endif
     config.max_uri_handlers = 6;
     config.max_open_sockets = 4;
     config.recv_wait_timeout = 30;
